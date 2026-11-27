@@ -2,12 +2,12 @@
 
 Backend API and background worker for **ChangeRadar**, a document change intelligence platform. The system compares versions of a document with a deterministic engine and adds evidence-grounded AI explanations on top.
 
-- **API:** NestJS, REST under `/api/v1` (routes start landing in Phase 1).
+- **API:** NestJS, REST under `/api/v1`, OpenAPI at `/api/docs` (enabled by `SWAGGER_ENABLED`).
 - **Worker:** the same codebase, no HTTP server; extraction, comparison and AI jobs (Phase 6+).
 - **Data:** PostgreSQL, Redis, and S3-compatible object storage (RustFS locally).
 - **Source of truth:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and the phase plan in [`docs/TASKS.md`](docs/TASKS.md).
 
-> **Current status:** Phase 0 is complete and verified; Phase 1 is next. The API and Worker boot, but there are no business routes, database schema or auth yet. See `docs/TASKS.md` for the roadmap.
+> **Current status:** Phase 1 application core is implemented and verified locally (config validation, envelopes, error catalog, logging, health, Swagger, Docker/CI). Staging deployment is blocked pending provider/credentials; the Docker image build is unverified because the local Docker daemon was unavailable. Database schema and auth arrive in Phases 2–3. See `docs/TASKS.md` for the roadmap.
 
 ## Prerequisites
 
@@ -33,7 +33,7 @@ npm ci
 # 2. Create the local environment file
 Copy-Item .env.example .env
 
-# 3. Start local infrastructure (PostgreSQL, Redis, RustFS)
+# 3. Start local infrastructure (PostgreSQL, Redis, RustFS, and optionally API/Worker images)
 docker compose up -d
 
 # 4. Run the API (terminal 1)
@@ -43,7 +43,15 @@ npm run start:api:dev
 npm run start:worker:dev
 ```
 
-The API listens on `http://localhost:4000`. There are no routed endpoints yet, so a request returns `404` — that is expected until Phase 1 adds health and the API prefix.
+The API listens on `http://localhost:4000`:
+
+| Endpoint                   | Purpose                                          |
+| -------------------------- | ------------------------------------------------ |
+| `GET /api/v1/health`       | Liveness (200, no dependency I/O)                |
+| `GET /api/v1/health/ready` | PostgreSQL, Redis and storage probes (200 / 503) |
+| `GET /api/docs`            | OpenAPI UI when `SWAGGER_ENABLED=true`           |
+
+`docker compose up -d --build` also builds and starts the API (`4000`) and Worker from one image.
 
 Check infrastructure:
 
@@ -56,21 +64,23 @@ docker compose logs storage-init
 
 ## Scripts
 
-| Script                     | Purpose                     |
-| -------------------------- | --------------------------- |
-| `npm run start:api:dev`    | API in watch mode           |
-| `npm run start:worker:dev` | Worker in watch mode        |
-| `npm run build`            | Compile to `dist/`          |
-| `npm run start:api`        | Run the compiled API        |
-| `npm run start:worker`     | Run the compiled Worker     |
-| `npm run lint`             | ESLint                      |
-| `npm run lint:fix`         | ESLint with fixes           |
-| `npm run format`           | Prettier write              |
-| `npm run format:check`     | Prettier check              |
-| `npm run typecheck`        | TypeScript without emit     |
-| `npm test`                 | Jest unit/integration tests |
-| `npm run test:watch`       | Jest watch mode             |
-| `npm run test:coverage`    | Jest with coverage          |
+| Script                     | Purpose                                                       |
+| -------------------------- | ------------------------------------------------------------- |
+| `npm run start:api:dev`    | API in watch mode                                             |
+| `npm run start:worker:dev` | Worker in watch mode                                          |
+| `npm run build`            | Compile to `dist/`                                            |
+| `npm run start:api`        | Run the compiled API                                          |
+| `npm run start:worker`     | Run the compiled Worker                                       |
+| `npm run lint`             | ESLint                                                        |
+| `npm run lint:fix`         | ESLint with fixes                                             |
+| `npm run format`           | Prettier write                                                |
+| `npm run format:check`     | Prettier check                                                |
+| `npm run typecheck`        | TypeScript without emit                                       |
+| `npm test`                 | Jest unit/integration tests                                   |
+| `npm run test:watch`       | Jest watch mode                                               |
+| `npm run test:coverage`    | Jest with coverage                                            |
+| `npm run check:circular`   | `madge` circular-import check                                 |
+| `npm run check:forbidden`  | CI guard against session-level `SET app.` / `$queryRawUnsafe` |
 
 ## Ports
 
@@ -91,14 +101,25 @@ src/
 ├── worker.ts               # Worker entry (no HTTP server)
 ├── app.module.ts
 ├── worker.module.ts
-├── config/                 # Phase 1: typed, validated configuration
-├── common/                 # errors, guards, decorators, interceptors, pagination
-├── infrastructure/         # database, storage, queue, redis
-└── modules/                # auth, users, workspaces, documents, comparisons, …
+├── config/                 # typed, validated configuration (Zod, fail fast)
+├── common/                 # errors, envelopes, logging, middleware, pagination DTOs
+├── infrastructure/redis/   # Redis client + throttler storage
+└── modules/health/         # liveness and readiness probes
 prisma/                     # Phase 2: schema, migrations, seed
 scripts/storage/            # RustFS bucket/CORS/lifecycle init
-test/                       # unit bootstrap, e2e, isolation, fixtures
+scripts/check-forbidden.js  # CI guard for forbidden SQL patterns
+test/                       # unit, e2e, isolation, fixtures
 ```
+
+## Shared infrastructure conventions
+
+- **Envelopes:** success is `{ success: true, data, meta?, correlationId }`; `meta` appears only on paginated lists (default 20, max 100). Errors use the §10.2 shape with a documented `errorCode` from §30.2.
+- **Correlation IDs:** `X-Request-Id` is accepted or generated, echoed as a response header and included in logs and envelopes. The Worker uses the same Pino logger/redaction.
+- **Validation:** global `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true })`. HTTP DTOs use `class-validator`/`class-transformer`; env, job payloads and AI output use Zod.
+- **Security:** `helmet`, cookie parser, and `trust proxy` from `TRUST_PROXY_HOPS` (0 locally; set per platform in staging/production). The API relies on the frontend's same-origin rewrite, so no API CORS is configured.
+- **Logging:** structured JSON via `nestjs-pino`; credentials, cookies, tokens, presigned URLs and document text are redacted and never logged.
+- **CI order:** lint → format check → typecheck → circular/forbidden checks → unit tests → build → runtime-only `npm audit`. Phase 2 adds migrations and isolation tests.
+- **Docker:** one multi-stage image; `node dist/main.js` for the API, `node dist/worker.js` for the Worker. Database migrations are never run at startup.
 
 ## Environment
 
@@ -140,7 +161,8 @@ docker compose up -d
 - **Port already in use:** PostgreSQL is published on host `5433` by default because `5432` is often taken by a local PostgreSQL. Override with `POSTGRES_PORT` in `.env` (also update the database URLs there). Redis/RustFS host ports are fixed in `docker-compose.yml`.
 - **Storage permission errors:** the `storage-permissions` helper must run before `storage`; check `docker compose logs storage-permissions`.
 - **Worker exits immediately:** it should stay alive until `Ctrl+C`; check the error printed by `npm run start:worker:dev`.
-- **`.env` changes ignored:** the app reads environment variables in Phase 1; until then only `PORT` is consumed by the API entry point.
+- **App fails to start with an "Invalid environment configuration" error:** `ConfigModule` validates every §17 variable at boot (fail fast). Copy `.env.example` to `.env` and fill missing values; `AI_API_KEY` may be empty with `AI_PROVIDER=fake`.
+- **Readiness returns 503:** inspect the `details` object; it names the unavailable dependency (PostgreSQL, Redis or storage). Liveness remains 200 so container orchestrators can distinguish restart from "not ready".
 
 ## Documentation
 

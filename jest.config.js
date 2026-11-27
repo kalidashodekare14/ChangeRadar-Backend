@@ -9,5 +9,6 @@ module.exports = {
   collectCoverageFrom: ['src/**/*.ts', '!src/generated/**'],
   coverageDirectory: 'coverage',
   testEnvironment: 'node',
+  setupFiles: ['<rootDir>/test/setup-env.ts'],
   clearMocks: true,
 };

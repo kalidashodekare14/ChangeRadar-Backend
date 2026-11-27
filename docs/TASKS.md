@@ -4,7 +4,7 @@
 **Version:** 2.1 — Full Roadmap with MVP Scope (development-ready)
 **Architecture:** `backend/ARCHITECTURE.md` (§ numbers below refer to it)
 **Last updated:** 2026-11-27
-**Status:** Phase 0 complete and verified; ready for Phase 1
+**Status:** Phase 1 core complete and verified locally; staging deployment and Docker image build verification blocked (see Phase 1)
 
 ---
 
@@ -42,7 +42,7 @@ Tasks were added or sharpened so the gaps closed in `ARCHITECTURE.md` v2.1 are b
 
 | Milestone | Phases | Result | Status |
 |---|---|---|---|
-| **M0 — Skeleton** | 0–1 | Empty app deployed to staging, CI green | Phase 0 done; Phase 1 next |
+| **M0 — Skeleton** | 0–1 | Empty app deployed to staging, CI green | Phases 0–1 core done; staging blocked |
 | **M1 — Core** | 2–7 | Upload two versions → deterministic comparison, deployed | Not started |
 | **M2 — Intelligence** | 8–9 | Review workflow + AI analysis, deployed | Not started |
 | **M3 — Portfolio release** | 10–12 | Invitations, dashboard, demo, hardening, public release | Not started |
@@ -60,7 +60,7 @@ Estimated MVP effort: 9–11 weeks part-time for the backend alone. The frontend
 
 **Goal:** Prepare the repository and understand its current state.
 
-**Status:** Done — implemented and verified (2026-11-27). Next: Phase 1.
+**Status:** Done — implemented and verified (2026-11-27). Phase 1 followed.
 
 **Scope guard:** Phase 0 delivers a runnable skeleton plus local infrastructure only. Do **not** add a Prisma schema/migrations, auth, business modules, health endpoints, Dockerfile, CI, `madge`, or feature dependencies here — those belong to Phases 1–12. No application code beyond minimal entry points and bootstrap modules.
 
@@ -211,25 +211,116 @@ test/e2e/  test/isolation/  test/fixtures/documents/
 
 ### Phase 1 — Application Core and Shared Infrastructure
 
-**Goal:** Reusable backend foundation + first deployment. (§10, §17, §19, §21)
+**Goal:** Reusable backend foundation + first deployment. (§10, §17, §18, §19, §21, §30.2)
 
-- [ ] Configure NestJS bootstrap, global modules and shared providers.
-- [ ] ConfigModule with environment validation (fail fast).
-- [ ] Global `ValidationPipe` and DTO conventions.
-- [ ] Global exception filter, `AppException`, error code catalog (§30.2).
-- [ ] Success and error envelopes (§10.2) with correlation IDs.
-- [ ] Structured logging (`nestjs-pino`) with redaction.
-- [ ] `helmet`, cookie parser, `trust proxy` configured from `TRUST_PROXY_HOPS` (§18).
-- [ ] Health and readiness endpoints.
-- [ ] API prefix `/api/v1`.
-- [ ] OpenAPI/Swagger.
-- [ ] Module dependency boundary check (`madge`) in CI.
-- [ ] Multi-stage Dockerfile (API + Worker commands).
-- [ ] GitHub Actions CI: lint → typecheck → test → build.
-- [ ] Choose hosting providers; deploy API + Worker skeleton to **staging**.
-- [ ] Document shared infrastructure conventions.
+**Status:** Implemented and verified locally on 2026-11-27. Remaining gaps: staging deployment is `[!]` blocked (no provider decision/credentials) and the Docker image build is unverified because the local Docker daemon was unavailable. Proceed to Phase 2 locally; return to staging when access exists.
 
-**Acceptance criteria:** global validation and error handling work; API docs available; logs contain correlation IDs without secrets; staging deployment responds on `/api/v1/health`.
+**Scope guard:** Phase 1 adds cross-cutting infrastructure only. Do **not** add a Prisma schema/migrations/models, auth flows, CSRF, tenant context/RLS, BullMQ queues, storage adapters, extractors, comparison engine logic, AI code, business endpoints or feature DTOs — those belong to Phases 2–12. Readiness checks stay lightweight dependency probes; deep, authenticated checks are tightened when the actual `PrismaService`, Redis and storage providers land in Phases 2/5. The comparison engine directory stays pure.
+
+#### 1.1 Work breakdown (in implementation order)
+
+**P1-01 — ConfigModule with environment validation (fail fast)**
+- [x] Add `@nestjs/config` and a global `ConfigModule` (`isGlobal: true`) loading `.env` with a Zod schema (`src/config/env.schema.ts`). Validate **all** §17 variables present in `.env.example`, including the v2.1 `TRUST_PROXY_HOPS` (0 locally) and the `S3_ENDPOINT` vs `S3_PUBLIC_ENDPOINT` distinction.
+- [x] Typed config access (`AppConfigService` wrapping `ConfigService<Env, true>`) so no code reads `process.env` directly. Secrets are never logged or exposed through config endpoints.
+- [x] Unit test: config validation throws with a clear aggregated error when a required variable is missing/invalid (e.g. `PORT=abc`, negative `TRUST_PROXY_HOPS`), and succeeds with the `.env.example` defaults.
+- New runtime deps: `@nestjs/config`, `zod` (Zod is also the basis for Phase 6 job payloads and Phase 9 AI output validation).
+
+**P1-02 — Structured logging with correlation IDs**
+- [x] Configure `nestjs-pino` (`LoggerModule.forRootAsync`, `pino-http`) app-wide and in the Worker application context; JSON logs with `LOG_LEVEL` from config and a request correlation ID.
+- [x] Correlation ID middleware: accept `X-Request-Id` or generate one (Node `crypto.randomUUID()`), attach it to the request, include it in every log line and in both success and error envelopes; return it as a response header.
+- [x] Pino redaction: `req.headers.authorization`, `req.headers.cookie`, `res.headers['set-cookie']`, and body fields `password`, `token`, `refreshToken`, `uploadToken`, `apiKey`, `secret`, plus top-level secret fields. Never log document text, prompts, extracted text, cookies or presigned URLs (§18).
+- [x] Worker logs use the same logger/redaction; job correlation IDs are added with the queues in Phase 6.
+- New runtime deps: `nestjs-pino`, `pino-http` (pin exact versions; verify Nest 12 / Node 26 compatibility before committing).
+
+**P1-03 — Global `ValidationPipe`, DTO conventions and response envelopes**
+- [x] Register global `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true })` (§10.1).
+- [x] DTO conventions: `class-validator` + `class-transformer` for HTTP DTOs; `@Type()` for coercion; shared `PaginationQueryDto` with `page=1`, `pageSize=20`, `max=100`, and a comparison-changes variant (`pageSize=50`, max 100) reserved for Phase 7. Zod stays for env/worker/AI payloads. Documented in `CONTRIBUTING.md`.
+- [x] Success envelope interceptor (`{ success: true, data, meta?, correlationId }`, §10.2); `meta` only for paginated lists via `paginate()`. Health endpoints also return the documented envelope.
+- [x] Tests: unknown property → 422 `VALIDATION_ERROR` (the filter remaps Nest's 400 from `ValidationPipe` to the catalog's 422); query params coerced to numbers; `pageSize > 100` rejected; paginated response carries `meta`, non-paginated does not.
+- New runtime deps: `class-validator`, `class-transformer`.
+
+**P1-04 — `AppException`, error code catalog and global exception filter**
+- [x] `src/common/errors/error-codes.ts`: the complete §30.2 catalog as a typed const (do not invent new codes); `AppException` carrying `errorCode`, `statusCode`, `message`, `details`.
+- [x] Global exception filter: maps `AppException`, Nest `HttpException`, validation errors (→ 422 `VALIDATION_ERROR` with `details`) and unknown errors (→ 500 `INTERNAL_ERROR`); emits the exact §10.2 error shape with `correlationId`, `timestamp` and `path`. No stack traces in responses; unexpected errors are logged server-side with redaction.
+- [x] Prisma error mapping hooks (unique → 409, FK/missing record → 404) **without importing the generated client** — concrete per-domain mapping is wired in later phases.
+- [x] Unit tests for each branch of the filter and for the envelope shape.
+
+**P1-05 — Security middleware and global throttling (§18)**
+- [x] `helmet()`, `cookieParser()` and Express `set('trust proxy', TRUST_PROXY_HOPS)` in `main.ts`; documented per-environment values of `TRUST_PROXY_HOPS` (0 locally; set per platform in staging/production, verified in Phase 12).
+- [x] Global `ThrottlerModule` with a custom Redis storage (`RedisThrottlerStorage`, atomic Lua INCR/EXPIRE) and conservative defaults; health endpoints use `@SkipThrottle({ global: true })` so liveness works when Redis is down. Per-route limits (login/register/refresh/upload-url/AI/demo) are added in their own phases. CORS is intentionally **not** enabled for the API: the frontend reaches it through a same-origin Next.js rewrite; storage CORS was handled in Phase 0.
+- New runtime deps: `helmet`, `cookie-parser`, `@nestjs/throttler`, Redis storage adapter, `ioredis` (verify exact package name/version for Nest 12 before install).
+
+**P1-06 — Health and readiness endpoints (§19)**
+- [x] `src/modules/health/`: module, controller, service and injectable probe interfaces for PostgreSQL, Redis and storage; `GET /api/v1/health` (liveness, no dependency I/O) and `GET /api/v1/health/ready` (probes with short timeouts, 200 when all up, 503 with per-dependency status otherwise).
+- [x] Phase 1 probes: Redis `PING` via `ioredis`; PostgreSQL `SELECT 1` via `pg` using the runtime `DATABASE_URL`; HTTP probe on `S3_ENDPOINT`. These are availability probes, not schema/bucket validation — deep checks arrive with Phases 2/5. No credentials or URLs in responses/logs.
+- [x] Tests: liveness always 200; readiness reports each dependency; a failing probe produces 503 without leaking connection strings. Verified locally with all three dependencies down: liveness 200, readiness 503 with per-dependency details.
+
+**P1-07 — Bootstrap, API prefix and OpenAPI (§10.1, §30.3)**
+- [x] Finalize `src/main.ts` bootstrap order: logger → helmet → cookie parser → trust proxy → global prefix `api/v1` → global pipes/filters/interceptors → throttler (APP_GUARD) → Swagger → `enableShutdownHooks()` → listen on `PORT` (default 4000). Config validation happens in `AppConfigModule` during module initialization. Worker uses the same config/logging modules with no HTTP server.
+- [x] `/api/docs` via `@nestjs/swagger` (DocumentBuilder, prefixes reflected), enabled only when `SWAGGER_ENABLED=true`; DTOs created in later phases automatically extend the spec.
+- [x] Verified `GET /api/v1/health` responds and `/api/docs` returns 200 with the default `SWAGGER_ENABLED=true`.
+
+**P1-08 — Module boundary and forbidden-pattern checks**
+- [x] `madge` dev dependency + script `check:circular` (`madge --circular --extensions ts src`), wired into CI. Keep `config → common → infrastructure → modules` as the intended direction; engine stays isolated. Note: madge's TypeScript peer range stops at v5; a scoped `overrides` entry maps it to the pinned TypeScript 6.
+- [x] `scripts/check-forbidden.js` + `check:forbidden` script fail on session-level `SET app.` and `$queryRawUnsafe` (CI enforcement of the full tenant-context rules lands in Phase 2).
+- New dev dep: `madge`.
+
+**P1-09 — Multi-stage Dockerfile and Compose services (§21)**
+- [x] `.dockerignore`; multi-stage `Dockerfile`: pinned Node 26 image → `npm ci` → build → non-root runtime image with production dependencies only. Two commands from one image: `node dist/main.js` (API) and `node dist/worker.js` (Worker). No migrations at startup.
+- [x] Extend `docker-compose.yml` with `api` and `worker` services using the same image/build, optional `.env` file, `depends_on` health conditions, API port `4000`, Worker with no published port; healthcheck against `/api/v1/health`.
+- [!] Blocked: `docker compose config` validates and both Node commands run locally, but `docker compose up -d --build` could not be verified — the local Docker daemon was not running. Re-run image build/startup when Docker Desktop is available.
+
+**P1-10 — GitHub Actions CI (§21, §18)**
+- [x] `.github/workflows/ci.yml` on push/PR: `npm ci` (Node 26.13.0 / npm 11.20.0, lockfile cache) → lint → format check → typecheck → `check:circular` + `check:forbidden` → unit tests → build. Phase 2 extends the same workflow with migrations on an empty DB → integration + isolation → build.
+- [x] Dependency check: `npm audit --omit=dev --audit-level=high` (0 runtime vulnerabilities; dev-only advisories are excluded and revisited in Phase 12).
+- [x] Every CI command was run locally and passed; the hosted GitHub Actions run has not yet been triggered (push after commit).
+
+**P1-11 — Staging deployment (provider decision + smoke test)**
+- [!] Blocked: no staging credentials/provider decision. Need hosting for API/Worker containers, managed PostgreSQL, managed Redis and S3-compatible storage; record the choice and per-environment `TRUST_PROXY_HOPS` in `README.md` once known.
+- [!] Blocked: deploy the Phase 1 skeleton to staging with secrets injected from the platform (never in the repo); smoke test `GET /api/v1/health` and confirm Worker stays alive.
+- [x] Dependency recorded: staging work is explicitly blocked and does not prevent Phase 2 locally. Return to this item when provider/credentials are available.
+
+**P1-12 — Documentation and verification sync**
+- [x] Document shared infrastructure conventions (envelopes, error codes, correlation IDs, env validation, logging/redaction, proxy hops, CI order, Docker commands) in `README.md` / `CONTRIBUTING.md`.
+- [x] Ran the full verification command set below; updated `AGENTS.md` "Repository state" and ticked items only after verification (blocked items are `[!]`).
+
+#### 1.2 Files to create / modify in Phase 1
+
+```text
+src/config/{env.schema.ts,app-config.service.ts,config.module.ts}
+src/common/errors/{error-codes.ts,app.exception.ts,error-response.ts,prisma-error.mapper.ts,all-exceptions.filter.ts}
+src/common/{http/correlation.ts,interceptors/response-envelope.interceptor.ts,middleware/correlation-id.middleware.ts}
+src/common/pagination/{pagination.dto.ts,paginated-response.ts}
+src/common/logging/{logging.module.ts,redaction.ts}
+src/modules/health/{health.module.ts,health.controller.ts,health.service.ts,probes/}
+src/app.module.ts  src/main.ts  src/worker.module.ts  src/worker.ts
+Dockerfile  .dockerignore
+.github/workflows/ci.yml
+package.json  package-lock.json  docker-compose.yml
+README.md  CONTRIBUTING.md  AGENTS.md  docs/TASKS.md
+```
+
+All new dependencies are installed with exact versions (`save-exact=true`) and the lockfile is committed. Capture the resolved versions of the new packages in `AGENTS.md` when P1-01 is implemented.
+
+#### 1.3 Phase 1 Definition of Done
+
+- `npm ci && npm run lint && npm run format:check && npm run typecheck && npm run check:circular && npm test && npm run build` passes.
+- Bootstrap fails fast on invalid/missing configuration; no `process.env` reads outside config.
+- `GET /api/v1/health` returns the success envelope; `/api/v1/health/ready` reports PostgreSQL/Redis/storage and 503 on failure; `/api/docs` toggles with `SWAGGER_ENABLED`.
+- Validation rejects unknown fields with 422 `VALIDATION_ERROR` + `details` + `correlationId`; no stack traces in production responses.
+- Logs are JSON with correlation IDs and pass redaction review (no secrets, cookies, tokens, document text or presigned URLs).
+- Dockerfile and compose services exist and `docker compose config` validates; API/Worker commands run locally. Docker image build/compose startup remains `[!]` blocked (daemon unavailable) and must be re-verified.
+- CI commands are green locally in the documented order; staging smoke test is explicitly `[!]` blocked.
+- Documentation matches reality; only verified items are `[x]`.
+
+#### 1.4 Risks / mitigations
+
+- **New dependency compatibility:** Nest 12 is ESM-only and Node 26 is new; verify `nestjs-pino`, `@nestjs/swagger`, `@nestjs/throttler` and the Redis storage adapter load under the existing CommonJS/`nodenext` + `require(esm)` setup and Jest's `--experimental-vm-modules` before pinning.
+- **Readiness before services exist:** Prisma service, real storage adapter and bucket checks arrive in Phases 2/5; keep probes availability-only and replace/extend them in those phases.
+- **CI audit noise:** dev-only advisories are excluded with `--omit=dev`; revisit in Phase 12, never suppress high-severity runtime findings.
+- **Staging access:** if provider/credentials are unavailable, record `[!]` and proceed — do not block Phases 2+ on deployment infrastructure.
+
+**Acceptance criteria:** global validation and error handling work; API docs available; logs contain correlation IDs without secrets. Local verification passed; the staging health check is `[!]` blocked pending provider/credentials.
 
 ---
 
@@ -604,5 +695,5 @@ test/e2e/  test/isolation/  test/fixtures/documents/
 
 ---
 
-**Current phase:** Phase 1 — Application Core and Shared Infrastructure
-**Overall status:** Phase 0 complete and verified; proceed to Phase 1 one checklist at a time
+**Current phase:** Phase 2 — Database Foundation and Multi-Tenant Isolation (Phase 1 core complete; staging deferred)
+**Overall status:** Phases 0–1 core complete and verified locally; staging deployment and Docker image build verification are `[!]` blocked in Phase 1; proceed with Phase 2 locally

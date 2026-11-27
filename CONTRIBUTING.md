@@ -51,9 +51,13 @@ Run from the repository root:
 npm run lint
 npm run format:check
 npm run typecheck
+npm run check:circular
+npm run check:forbidden
 npm test
 npm run build
 ```
+
+CI runs the same commands in this order: lint → format → typecheck → boundary checks → unit tests → build → runtime-only `npm audit`. Phase 2 extends it with migrations on an empty database, integration and tenant-isolation suites.
 
 Also verify the relevant runtime path (API, Worker, infrastructure) for the phase you changed.
 
@@ -67,6 +71,13 @@ Also verify the relevant runtime path (API, Worker, infrastructure) for the phas
 - [ ] Error codes come from the documented catalog.
 - [ ] Tests added/updated and listed verification commands pass.
 - [ ] `docs/TASKS.md` status is accurate (`[ ]`, `[x]`, `[!]`, `[-]`).
+
+## DTO and validation conventions
+
+- HTTP DTOs use `class-validator` + `class-transformer` because Nest's `ValidationPipe` implements `whitelist`/`forbidNonWhitelisted`. Add validators to every exposed field.
+- Zod is used for environment validation (`src/config/env.schema.ts`), and later for BullMQ job payloads and AI output. Do not read `process.env` outside the config module.
+- Paginated handlers return `paginate(items, { page, pageSize, total })` so the global interceptor adds `meta`.
+- Domain errors throw `AppException` with a code from the §30.2 catalog; never invent ad-hoc error codes.
 
 ## Security rules
 
