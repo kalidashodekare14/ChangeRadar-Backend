@@ -1,0 +1,14 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-temp-uploads",
+      "Filter": {
+        "Prefix": "uploads/"
+      },
+      "Status": "Enabled",
+      "Expiration": {
+        "Days": 1
+      }
+    }
+  ]
+}

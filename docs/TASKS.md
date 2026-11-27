@@ -4,13 +4,13 @@
 **Version:** 2.1 — Full Roadmap with MVP Scope (development-ready)
 **Architecture:** `backend/ARCHITECTURE.md` (§ numbers below refer to it)
 **Last updated:** 2026-11-27
-**Status:** Ready for development (v2.1 readiness review applied)
+**Status:** Phase 0 complete and verified; ready for Phase 1
 
 ---
 
 ## 0. Changes in v2.1 (readiness review)
 
-Tasks were added or sharpened so the gaps closed in `ARCHITECTURE.md` v2.1 are built and tested in the right phase: MinIO CORS and public endpoint (Phase 0), `TRUST_PROXY_HOPS` (Phase 1), additive columns (Phase 2), CSRF bootstrap and cookie lifetimes (Phase 3), permission keys (Phase 4), upload idempotency (Phase 5), single-change endpoint and review counts (Phases 7–8), AI coverage (Phase 9), invitation preview (Phase 10), dashboard split and demo protection (Phase 11), client-IP verification (Phase 12).
+Tasks were added or sharpened so the gaps closed in `ARCHITECTURE.md` v2.1 are built and tested in the right phase: local S3 CORS (RustFS) and public endpoint (Phase 0), `TRUST_PROXY_HOPS` (Phase 1), additive columns (Phase 2), CSRF bootstrap and cookie lifetimes (Phase 3), permission keys (Phase 4), upload idempotency (Phase 5), single-change endpoint and review counts (Phases 7–8), AI coverage (Phase 9), invitation preview (Phase 10), dashboard split and demo protection (Phase 11), client-IP verification (Phase 12).
 
 ---
 
@@ -42,7 +42,7 @@ Tasks were added or sharpened so the gaps closed in `ARCHITECTURE.md` v2.1 are b
 
 | Milestone | Phases | Result | Status |
 |---|---|---|---|
-| **M0 — Skeleton** | 0–1 | Empty app deployed to staging, CI green | Not started |
+| **M0 — Skeleton** | 0–1 | Empty app deployed to staging, CI green | Phase 0 done; Phase 1 next |
 | **M1 — Core** | 2–7 | Upload two versions → deterministic comparison, deployed | Not started |
 | **M2 — Intelligence** | 8–9 | Review workflow + AI analysis, deployed | Not started |
 | **M3 — Portfolio release** | 10–12 | Invitations, dashboard, demo, hardening, public release | Not started |
@@ -60,22 +60,154 @@ Estimated MVP effort: 9–11 weeks part-time for the backend alone. The frontend
 
 **Goal:** Prepare the repository and understand its current state.
 
-- [ ] Inspect the existing backend repository (if any).
-- [ ] Review backend, frontend and database parts of `ARCHITECTURE.md`.
-- [ ] Confirm and pin Node.js, NestJS, TypeScript and Prisma versions.
-- [ ] Establish the modular monolith folder structure (§7).
-- [ ] Establish API (`main.ts`) and Worker (`worker.ts`) entry points.
-- [ ] Configure environment variable conventions and create `.env.example` (§17).
-- [ ] Configure ESLint and Prettier.
-- [ ] Configure `.gitignore`.
-- [ ] Establish branch and commit conventions (Conventional Commits).
-- [ ] Create `docker-compose.yml` (PostgreSQL, Redis, MinIO with bucket).
-- [ ] MinIO init script: create the bucket, apply CORS (allow `PUT` and `GET` from `http://localhost:3000`, header `Content-Type`, expose `ETag`) and the `uploads/` 1-day lifecycle rule (§11.2).
-- [ ] `.env.example` lists `S3_ENDPOINT` (server-side, e.g. `http://minio:9000`) and `S3_PUBLIC_ENDPOINT` (browser-reachable, e.g. `http://localhost:9000`).
-- [ ] Document local development setup in `README.md`.
-- [ ] Verify API and Worker both start.
+**Status:** Done — implemented and verified (2026-11-27). Next: Phase 1.
 
-**Acceptance criteria:** backend starts locally; API and Worker responsibilities documented; configuration validated; no secrets committed.
+**Scope guard:** Phase 0 delivers a runnable skeleton plus local infrastructure only. Do **not** add a Prisma schema/migrations, auth, business modules, health endpoints, Dockerfile, CI, `madge`, or feature dependencies here — those belong to Phases 1–12. No application code beyond minimal entry points and bootstrap modules.
+
+#### 0.1 Inspection result (completed during planning)
+
+- [x] Inspect the existing backend repository (if any).
+- [x] Review backend, frontend and database parts of `ARCHITECTURE.md`. *(Frontend companion docs referenced by ARCHITECTURE are not in this repository; §4–§5 system/frontend boundaries were reviewed.)*
+
+Findings:
+
+- Repository contains only `AGENTS.md`, `docs/ARCHITECTURE.md` (v2.1) and `docs/TASKS.md`. Branch `main`, one commit (`f66ac3a`), `AGENTS.md` currently untracked.
+- No `package.json`, lockfile, `src/`, `prisma/`, tests, CI, Docker assets or `.env`.
+- Local machine: Node.js `26.13.0`, npm `11.20.0`, Git `2.56.0`, Docker `29.9.3` / Compose `v5.7.1`. The Docker CLI is installed under `%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin` and may need a shell/PATH refresh.
+- **MinIO is no longer publicly available:** the `minio/minio` and `minio/mc` Docker Hub repositories are removed and `dl.min.io` returns `410 Gone`. Local storage therefore uses **RustFS 1.0.7** (Apache 2.0), which was verified for S3 bucket creation, presigned URLs, CORS preflight and lifecycle rules. The S3 adapter and `S3_*` contract are unchanged.
+- API will use port **4000** locally (the frontend owns `3000`); RustFS console uses `9001`.
+
+#### 0.2 Pinned technology baseline
+
+Pin policy: exact versions in `package.json` (no `^` for framework/tooling), committed `package-lock.json`, Node pinned by `.nvmrc` + `engines`, upgrades only through reviewed dependency changes.
+
+| Component | Pinned version | Reason / notes |
+|---|---|---|
+| Node.js | `26.13.0` (LTS line) | Installed locally; supported by Nest 12 / Prisma 7. |
+| npm | `11.20.0` | Installed locally; `packageManager` + `engines`. |
+| NestJS (`common`/`core`/`platform-express`/`testing`) | `12.6.3` | Current stable; Express adapter. CLI `12.0.15`, schematics `12.0.17`. |
+| TypeScript | `6.0.3` | Nest 12 CLI/schematics require `^6.0.0`; `ts-jest` allows `<7` and `typescript-eslint@8.74.0` allows `<6.1`. |
+| Prisma (`prisma`/`@prisma/client`/`@prisma/adapter-pg`) | `7.10.1` | **Not 8.0.0-rc.36 (RC).** Use the `prisma-client` generator, `moduleFormat = "cjs"`, `output = "../src/generated/prisma"`; runtime URL via `PrismaPg`; CLI URL via root `prisma.config.ts` (Phase 2). |
+| Jest / ts-jest | `30.5.2` / `29.4.15` | Jest 30 + TypeScript 6 compatible. Test scripts pass `--experimental-vm-modules` because Nest packages are ESM-only. |
+| Supertest | `7.3.2` | E2E in later phases. |
+| ESLint / typescript-eslint | `10.15.0` / `8.74.0` | Flat config (`eslint.config.mjs`), type-aware rules. |
+| Prettier | `3.10.1` | With `eslint-config-prettier`. |
+| PostgreSQL (container) | `postgres:17-alpine` | Meets PostgreSQL 16+; pinned image. |
+| Redis (container) | `redis:7.4-alpine` | BullMQ-compatible; pinned image. |
+| MinIO (container) | ❌ unavailable | `minio/minio` Docker Hub repository and `dl.min.io` binaries are gone (410). Replaced by RustFS. |
+| RustFS (container) | `rustfs/rustfs:1.0.7` | Apache 2.0 S3-compatible local storage; ports 9000/9001; verified CORS + lifecycle. |
+| AWS CLI (storage init) | `amazon/aws-cli:2.42.4` | Creates the bucket, applies CORS and lifecycle through standard `s3api`; no dependency on `mc`. |
+
+Compatibility decisions to keep in mind:
+
+- Keep the backend source **CommonJS** (`"type": "commonjs"` in `package.json`) so Prisma’s `cjs` output and the existing tooling work; Nest 12 packages are ESM-only and are loaded through Node’s `require(esm)` support.
+- `tsconfig.json` therefore uses `module: nodenext`, `moduleResolution: nodenext`, `resolvePackageJsonExports: true` (the official Nest 12 CommonJS template) plus explicit `types: ["node", "jest"]`. `module: commonjs`/`moduleResolution: node10` are deprecated in TypeScript 6.
+- Jest requires `node --experimental-vm-modules ./node_modules/jest/bin/jest.js` (as in the official Nest 12 CommonJS template) to load ESM-only Nest packages.
+- Prisma 7 pins `effect@3.20.0` through `@prisma/config`; a `package.json` override to `effect@3.22.5` removes the high-severity ReDoS advisory without a major version jump. Jest’s dev-only `glob`/`minimatch` advisories remain (no compatible fix without downgrading Jest).
+- TypeScript `target`/`lib` `ES2023`, `strict: true`, decorators + metadata enabled.
+- Phase 0 does **not** run `prisma generate` (no schema yet). Package versions are still pinned now; generation starts in Phase 2.
+- Feature dependencies (BullMQ, AWS SDK, argon2, AI, extractors) are added in their own phases using the versions in this baseline; Phase 0 installs only framework, test, lint and Prisma packages.
+
+#### 0.3 Work breakdown
+
+**P0-01 — Package manifest and toolchain**
+- [x] Create `package.json` (`private`, `engines`, `packageManager`, pinned dependencies) and `.nvmrc` (`26.13.0`).
+- [x] Create `.npmrc` (`save-exact=true`, `engine-strict=true`).
+- [x] Add scripts: `build`, `start:api`, `start:worker`, `start:api:dev`, `start:worker:dev`, `lint`, `lint:fix`, `format`, `format:check`, `typecheck`, `test`, `test:watch`, `test:coverage`.
+- [x] Create `nest-cli.json`, `tsconfig.json`, `tsconfig.build.json`, `jest.config.js`.
+- [x] Install dependencies and commit `package-lock.json`.
+
+**P0-02 — Folder skeleton (§7)**
+- [x] Create the exact `src/` tree from §7: `config/`, `common/{errors,guards,decorators,interceptors,pagination}/`, `infrastructure/{database,storage,queue,redis}/`, and the MVP module folders (`auth`, `users`, `workspaces`, `invitations`, `authorization`, `documents`, `versions`, `storage`, `extraction`, `comparisons/engine`, `reviews`, `ai-intelligence/providers`, `processing`, `dashboard`, `demo`, `health`).
+- [x] Create `prisma/`, `test/{e2e,isolation,fixtures/documents}/`, `scripts/{db,storage}/`.
+- [x] Add `.gitkeep` to empty leaf directories; no placeholder business logic.
+
+**P0-03 — Entry points**
+- [x] `src/app.module.ts` + `src/main.ts`: create the Nest app, `enableShutdownHooks()`, listen on `PORT` (default `4000`).
+- [x] `src/worker.module.ts` + `src/worker.ts`: create a standalone application context (no HTTP server), log ready, stay alive via an explicit interval handle plus a signal-driven promise, close cleanly on `SIGTERM`/`SIGINT`. *(BullMQ keeps the Worker alive from Phase 6; the explicit wait prevents an immediate exit now.)*
+- [x] Minimal bootstrap smoke test (`test/bootstrap.spec.ts`) compiling both root modules with `@nestjs/testing`.
+- [x] Do **not** add controllers, global pipes/filters, prefix or `/health` yet — Phase 1.
+
+**P0-04 — Environment conventions (§17)**
+- [x] Create `.env.example` with every variable from §17, grouped and commented, safe local defaults and obvious placeholders for secrets.
+- [x] Document the `S3_ENDPOINT` (server-side, `http://storage:9000` inside compose / `http://localhost:9000` from the host) vs `S3_PUBLIC_ENDPOINT` (browser-reachable `http://localhost:9000`) distinction.
+- [x] Document local role strategy: compose creates the bootstrap superuser/database; `changeradar_migrator` and `changeradar_app` are created in Phase 2. `.env.example` shows the final runtime/migrator URLs; README notes the temporary bootstrap URL until Phase 2.
+- [x] Set `TRUST_PROXY_HOPS=0`, `APP_URL=http://localhost:3000`, `AI_PROVIDER=fake`, `DEMO_ENABLED=false`, `SWAGGER_ENABLED=true`, `LOG_LEVEL=info`.
+- [x] Ensure `.env` is ignored and no real secret is committed.
+
+**P0-05 — ESLint and Prettier**
+- [x] `eslint.config.mjs` (flat): `@eslint/js`, `typescript-eslint` type-aware recommended, `eslint-config-prettier`; ignore `dist/`, `coverage/`, `src/generated/`, `node_modules/`.
+- [x] `.prettierrc`, `.prettierignore`, `.editorconfig`.
+- [x] Verify `npm run lint`, `npm run format:check` on the skeleton.
+
+**P0-06 — Git hygiene and conventions**
+- [x] `.gitignore`: `node_modules/`, `dist/`, `coverage/`, `.env*` (except `.env.example`), `src/generated/`, logs, OS/editor files, local volume data.
+- [x] `.gitattributes`: `* text=auto eol=lf`; force LF for `*.sh` (storage init runs in Linux), CRLF for `*.bat`/`*.ps1`.
+- [x] `CONTRIBUTING.md`: Conventional Commits (`feat|fix|chore|docs|refactor|test|build|ci|perf|revert`), branch naming (`feat/phase-0-foundation`, `fix/…`, `chore/…`), PR checklist (phase, invariants, verification evidence).
+- [x] Decision: no Husky/commitlint hooks in Phase 0 (avoid install friction); revisit when CI lands in Phase 1.
+
+**P0-07 — Local infrastructure (compose + RustFS init)**
+- [x] `docker-compose.yml`: `postgres`, `redis`, `storage` (RustFS), `storage-permissions`, `storage-init`; named volumes, healthchecks, one network; pinned images. API/Worker services are added in Phase 1 after the Dockerfile.
+- [x] PostgreSQL: database `changeradar`, bootstrap user/password local-only, container port `5432` published as host port `5433` by default (`POSTGRES_PORT`) because 5432 may be occupied by a local PostgreSQL.
+- [x] Redis: append-only, port `6379`.
+- [x] RustFS: ports `9000`/`9001`, private bucket `changeradar` (from `S3_BUCKET`), local-only credentials; run as UID/GID `10001:10001` with a one-shot volume-permission helper.
+- [x] `scripts/storage/init.sh`: wait for storage, create bucket if missing, block public access, apply CORS, add the `uploads/` 1-day expiry rule, then print the applied rules. Use `amazon/aws-cli` with `s3api` — no `mc` dependency.
+- [x] `scripts/storage/cors.json` + `scripts/storage/lifecycle.json`: allow `PUT` and `GET` from `APP_URL` (`http://localhost:3000`), header `Content-Type`, expose `ETag`; expire the `uploads/` prefix after 1 day.
+- [x] Verify the exact AWS CLI `s3api` payloads against the pinned RustFS/AWS CLI versions rather than assuming.
+
+**P0-08 — README and local setup**
+- [x] `README.md`: purpose, architecture summary, repository layout, prerequisites (Node 26, npm 11, Docker Desktop), quick start, scripts table, ports table (frontend 3000, API 4000, Postgres 5433 host/5432 container, Redis 6379, RustFS 9000/9001), API vs Worker responsibilities, troubleshooting, docs links.
+- [x] Explicit “no secrets committed” and “`.env.example` is the only committed env file”.
+- [x] Document that health endpoints, config validation, DB migrations and roles arrive in Phases 1–2.
+
+**P0-09 — Verification and documentation sync**
+- [x] `npm ci` from a clean `node_modules` succeeds.
+- [x] `npm run lint`, `npm run format:check`, `npm run typecheck`, `npm test`, `npm run build` all pass.
+- [x] API starts (`npm run start:api:dev`) and listens on `:4000`; stops cleanly. (Verified 404 for `/` as no routes exist yet.)
+- [x] Worker starts (`npm run start:worker:dev`), logs ready, stays alive, stops cleanly.
+- [x] `docker compose config` validates; `docker compose up -d` makes all services healthy (or `storage-init` exits 0).
+- [x] RustFS bucket exists, is private, CORS preflight from `http://localhost:3000` returns `PUT`/`GET` + `ETag`, and `uploads/` expiry is listed.
+- [x] `git status` shows only intended files; `.env` and generated output are not tracked.
+- [x] Update `AGENTS.md` “Repository state” with the scaffold, scripts and actual commands now that they exist.
+- [x] Tick Phase 0 items and set “Current phase” to Phase 1.
+
+#### 0.4 Files to create in Phase 0
+
+```text
+.nvmrc  .npmrc  .gitignore  .gitattributes  .editorconfig
+.env.example
+eslint.config.mjs  .prettierrc  .prettierignore
+package.json  package-lock.json
+nest-cli.json  tsconfig.json  tsconfig.build.json
+README.md  CONTRIBUTING.md
+docker-compose.yml
+scripts/storage/init.sh  scripts/storage/cors.json  scripts/storage/lifecycle.json
+src/main.ts  src/worker.ts  src/app.module.ts  src/worker.module.ts
+src/config/  src/common/…  src/infrastructure/…  src/modules/…
+prisma/  test/bootstrap.spec.ts  jest.config.js
+test/e2e/  test/isolation/  test/fixtures/documents/
+```
+
+#### 0.5 Phase 0 Definition of Done
+
+- `npm ci && npm run lint && npm run format:check && npm run typecheck && npm test && npm run build` passes.
+- API and Worker both start locally with documented responsibilities and clean shutdown.
+- Local Postgres/Redis/RustFS come up healthy via one command; bucket, CORS and lifecycle are correct.
+- `.env.example` covers every §17 variable and no secret is committed.
+- `README.md`, `CONTRIBUTING.md` and `AGENTS.md` match the actual scaffold and scripts.
+- Only then mark Phase 0 `[x]`.
+
+#### 0.6 Risks / blockers
+
+- **Resolved:** Docker Desktop is now installed (29.9.3 / Compose 5.7.1); the CLI may require a PATH refresh in existing shells.
+- **Resolved — storage provider:** MinIO community images and binaries are no longer publicly distributed, so local storage uses RustFS 1.0.7. Bucket creation, presigned URLs, CORS preflight and lifecycle were verified before adopting it. Re-check RustFS image tags per release.
+- **Resolved — host port conflict:** a local PostgreSQL process owns host port 5432. Compose now publishes `POSTGRES_PORT` (default `5433`) to container 5432; no local service was stopped.
+- **Resolved — dependency tree:** Nest 12 CLI/schematics require TypeScript `^6.0.0`; `typescript-eslint@8.74.0` allows `<6.1`, so `6.0.3` was pinned. The vulnerable `effect` pinned by `@prisma/config` is overridden to `3.22.5`; only dev-only `glob`/`minimatch` advisories remain.
+- **Resolved — ESM-only Nest packages:** Node 26 `require(esm)` plus Nest's official `nodenext` CommonJS tsconfig works; Jest scripts pass `--experimental-vm-modules`.
+- Prisma 7 is ESM-first; the plan uses its `moduleFormat = "cjs"` option. Re-verify generation in Phase 2 when `schema.prisma` exists. If ESM output is required instead, switch the generator to `"esm"` consistently.
+- Node 26 is new relative to some tooling; `ts-jest` works with the flag above. If it misbehaves later, record the fallback (Jest 30 + SWC or `isolatedModules`) before changing the pinned baseline.
+
+**Acceptance criteria:** backend starts locally; API and Worker responsibilities documented; configuration conventions validated; no secrets committed.
 
 ### Phase 1 — Application Core and Shared Infrastructure
 
@@ -197,7 +329,7 @@ Estimated MVP effort: 9–11 weeks part-time for the backend alone. The frontend
 - [ ] Version list, detail, content (blocks) and arbitrary version retrieval.
 - [ ] Secure download URL.
 - [ ] Bucket lifecycle rule for `uploads/`.
-- [ ] Tests: concurrent uploads get sequential numbers; replayed token returns the same version (also after `tempKey` was deleted — never 409); two simultaneous completions with the same token create exactly one version; same file with a **new** token → 409; same file after a FAILED latest version → accepted; tampered/foreign token rejected; VIEWER cannot upload; a browser-style PUT to the presigned URL works against local MinIO (CORS).
+- [ ] Tests: concurrent uploads get sequential numbers; replayed token returns the same version (also after `tempKey` was deleted — never 409); two simultaneous completions with the same token create exactly one version; same file with a **new** token → 409; same file after a FAILED latest version → accepted; tampered/foreign token rejected; VIEWER cannot upload; a browser-style PUT to the presigned URL works against local RustFS (CORS).
 - [-] Folders and subfolders — **Deferred** (Future F2).
 - [-] Tags and categories — **Deferred** (Future F2).
 - [-] Workspace-scoped full-text search — **Deferred** (Future F5).
@@ -472,5 +604,5 @@ Estimated MVP effort: 9–11 weeks part-time for the backend alone. The frontend
 
 ---
 
-**Current phase:** Phase 0 — ready to start
-**Overall status:** Ready for development
+**Current phase:** Phase 1 — Application Core and Shared Infrastructure
+**Overall status:** Phase 0 complete and verified; proceed to Phase 1 one checklist at a time

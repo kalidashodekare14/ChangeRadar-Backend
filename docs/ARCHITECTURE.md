@@ -29,6 +29,7 @@ No v2.0 decision was reversed. v2.1 closes gaps found before development started
 | 24 | Additive columns: `document_versions.upload_token_id`, `ai_analyses.analyzed_change_count` |
 | 30 | New endpoints/rows (`/auth/csrf`, single change); dashboard returns counts only; new §30.3 response shapes |
 | 31 / 33 | Decisions M-10 … M-17; deferred item 33.30 |
+| 5 / 11.2 / 20–21 | Local object storage is **RustFS** (Apache 2.0). MinIO community images and binaries are no longer publicly distributed (Docker Hub repositories removed; `dl.min.io` returns 410). The S3 adapter, `S3_*` settings, presigned-URL contract and private-bucket rules are unchanged. |
 
 ---
 
@@ -231,7 +232,7 @@ flowchart TB
 | API documentation | OpenAPI / Swagger |
 | Validation | class-validator + class-transformer (DTOs); Zod for job payloads and AI output |
 | Authentication | Backend-managed, HttpOnly cookies, access + refresh tokens, argon2id |
-| Storage | S3-compatible (AWS SDK v3); MinIO locally |
+| Storage | S3-compatible (AWS SDK v3); RustFS locally |
 | Extraction | `pdfjs-dist`, `mammoth`, `remark`, plain text reader |
 | Diff | `diff` (jsdiff) |
 | Logging | `nestjs-pino` structured JSON |
@@ -590,7 +591,7 @@ NestJS Throttler with Redis storage; IP and user limits; HTTP 429. Request-rate 
 ## 11.2 Rules
 
 - Private bucket; never public objects.
-- Presigned URLs are signed for `S3_PUBLIC_ENDPOINT` (the address the **browser** reaches, e.g. `http://localhost:9000` for local MinIO); server-side calls use `S3_ENDPOINT`.
+- Presigned URLs are signed for `S3_PUBLIC_ENDPOINT` (the address the **browser** reaches, e.g. `http://localhost:9000` for local RustFS); server-side calls use `S3_ENDPOINT`.
 - Bucket CORS (local compose init script and production): allow `PUT` and `GET` from the frontend origin (`APP_URL`), header `Content-Type`, expose `ETag`.
 - Downloads: `GET …/download-url` → presigned GET, 5 minutes, `Content-Disposition: attachment`.
 - Never trust client MIME type or size; never log presigned URLs or tokens.
@@ -883,7 +884,7 @@ TRUST_PROXY_HOPS                 # trusted proxies in front of the API (0 locall
 |---|---|
 | Unit | Engine, signals, severity, extractors, upload token, permission matrix |
 | Engine fixtures | Real document pairs → snapshot of changes and evidence |
-| Integration | Services with real PostgreSQL, Redis, MinIO (Testcontainers) |
+| Integration | Services with real PostgreSQL, Redis and S3-compatible storage (RustFS via Testcontainers) |
 | API / E2E | HTTP flows with cookies, CSRF, refresh |
 | AI | Fake provider: invalid output, timeout, evidence validation |
 | Tenant isolation | Mandatory suite below |
@@ -915,7 +916,7 @@ TRUST_PROXY_HOPS                 # trusted proxies in front of the API (0 locall
 | Item | Decision |
 |---|---|
 | Containers | One multi-stage Dockerfile; two commands (`dist/main.js`, `dist/worker.js`) |
-| Local | Docker Compose: PostgreSQL, Redis, MinIO, API, Worker |
+| Local | Docker Compose: PostgreSQL, Redis, RustFS, API, Worker |
 | Environments | Local, Staging, Production |
 | CI | GitHub Actions: lint → typecheck → unit → migrations on empty DB → integration + isolation → build |
 | Hosting | Container hosting for API and Worker (scaled separately), managed PostgreSQL, managed Redis, S3-compatible storage. Provider chosen in Phase 1 (M0). |
