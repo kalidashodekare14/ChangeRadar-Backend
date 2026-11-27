@@ -7,7 +7,7 @@ Backend API and background worker for **ChangeRadar**, a document change intelli
 - **Data:** PostgreSQL, Redis, and S3-compatible object storage (RustFS locally).
 - **Source of truth:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and the phase plan in [`docs/TASKS.md`](docs/TASKS.md).
 
-> **Current status:** Phases 1–2 are implemented and verified locally. Phase 2 adds the 15-table MVP schema, migrator/runtime roles, forced RLS, `TenantDb` transaction-local context, seeds and the isolation suite. Staging deployment remains blocked pending provider/credentials. Auth arrives in Phase 3. See `docs/TASKS.md` for the roadmap.
+> **Current status:** Phases 1–3 are implemented and verified locally. Phase 2 adds the 15-table MVP schema, migrator/runtime roles, forced RLS and the isolation suite; Phase 3 adds cookie-based authentication, sessions and CSRF. Staging deployment remains blocked pending provider/credentials. See `docs/TASKS.md` for the roadmap.
 
 ## Prerequisites
 
@@ -52,6 +52,28 @@ The API listens on `http://localhost:4000`:
 | `GET /api/docs`            | OpenAPI UI when `SWAGGER_ENABLED=true`           |
 
 `docker compose up -d --build` also builds and starts the API (`4000`) and Worker from one image.
+
+### Authentication (Phase 3)
+
+Auth uses first-party HttpOnly cookies. Every state-changing request (`POST`/`PUT`/`PATCH`/`DELETE`) — **including login, register and refresh** — must send `X-CSRF-Token` matching the `cr_csrf` cookie. When the cookie is absent, bootstrap it first:
+
+```text
+GET  /api/v1/auth/csrf          -> { csrfToken }  (sets cr_csrf)
+POST /api/v1/auth/register      { name, email, password }
+POST /api/v1/auth/login         { email, password }
+POST /api/v1/auth/refresh       (rotates cr_refresh; new cr_access)
+POST /api/v1/auth/logout
+GET  /api/v1/auth/me
+GET  /api/v1/auth/sessions
+DELETE /api/v1/auth/sessions/:sessionId
+POST /api/v1/auth/sessions/revoke-others
+PATCH /api/v1/users/me          { name }
+POST /api/v1/users/me/password  { currentPassword, newPassword }
+```
+
+Cookie rules (§9.1): `cr_access` (`Path=/`, HttpOnly, outlives the 15-minute JWT for the whole session), `cr_refresh` (`Path=/api/v1/auth`, HttpOnly) and `cr_csrf` (`Path=/`, readable by JS, 30 days). All use `SameSite=Lax`, `Secure` in production and no `Domain`. On register/login/refresh the CSRF cookie rotates — read the new value from `document.cookie`. Logout and `INVALID_REFRESH_TOKEN` / `SESSION_REVOKED` clear all three cookies. An expired-but-signed JWT returns `401 TOKEN_EXPIRED` (then refresh); a missing/invalid one returns `401 UNAUTHENTICATED`, a revoked session `401 SESSION_REVOKED`.
+
+Global guard order is `ThrottlerGuard` → `CsrfGuard` → `AuthGuard`; `@Public()` bypasses only `AuthGuard`. Login/register/refresh are limited to 5/3/30 requests per minute per IP using the Redis throttler. The dev seed user `dev@example.com` logs in with `ChangerRadar-dev-only` (development only — never used in staging/production).
 
 Check infrastructure:
 
@@ -105,6 +127,9 @@ src/
 ├── common/                 # errors, envelopes, logging, middleware, pagination DTOs
 ├── infrastructure/database/ # PrismaService, TenantDb, tenant repository base
 ├── infrastructure/redis/   # Redis client + throttler storage
+├── setup-app.ts            # shared HTTP bootstrap (main.ts + E2E tests)
+├── modules/auth/           # identity, sessions, tokens, cookies, guards, CSRF
+├── modules/users/          # profile + password change
 └── modules/health/         # liveness and readiness probes
 prisma/schema.prisma        # 15 MVP tables + 14 MVP enums
 prisma/migrations/          # generated Prisma migration
@@ -123,6 +148,7 @@ test/                       # unit, e2e, isolation, fixtures
 - **Correlation IDs:** `X-Request-Id` is accepted or generated, echoed as a response header and included in logs and envelopes. The Worker uses the same Pino logger/redaction.
 - **Validation:** global `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true })`. HTTP DTOs use `class-validator`/`class-transformer`; env, job payloads and AI output use Zod.
 - **Security:** `helmet`, cookie parser, and `trust proxy` from `TRUST_PROXY_HOPS` (0 locally; set per platform in staging/production). The API relies on the frontend's same-origin rewrite, so no API CORS is configured.
+- **Auth pipeline:** global `ThrottlerGuard` → `CsrfGuard` → `AuthGuard`; only `@Public()` routes skip authentication, never CSRF. `users`/`sessions` are global tables (PrismaService), all tenant rows stay behind `TenantDb.run()`.
 - **Logging:** structured JSON via `nestjs-pino`; credentials, cookies, tokens, presigned URLs and document text are redacted and never logged.
 - **CI order:** lint → format check → typecheck → circular/forbidden checks → unit tests → build → runtime-only `npm audit`, plus a database job: roles → migrations on an empty DB → manual SQL → isolation tests → build.
 - **Docker:** one multi-stage image; `node dist/main.js` for the API, `node dist/worker.js` for the Worker. Database migrations are never run at startup.
@@ -155,6 +181,7 @@ npm run db:seed                     # two users/workspaces + sample data (idempo
 - `npm run check:forbidden` fails on session-level `SET app.`, unsafe raw SQL, `set_config` outside `TenantDb`, and direct generated-client imports outside the database/error layer.
 - Isolation tests: `RUN_DB_TESTS=true npm test -- --runInBand test/isolation`. They seed fixtures as the migrator role and run all assertions as `changeradar_app`. Cases 1–4 and 9–14 of ARCHITECTURE §20 run in this phase; cases 5–8 are added with their features.
 - Release/rollback: roles → `migrate deploy` → manual SQL → grants → app deploy. Roll back by redeploying the previous image; migrations follow expand → migrate → contract. Deferred features are additive only.
+- Auth E2E (`test/e2e/auth.e2e.spec.ts`) runs against the same migrated database and Redis when `RUN_DB_TESTS=true`; locally it reads DB URLs from `.env` (CI injects its own). Run it with `$env:RUN_DB_TESTS='true'; npm test -- --runInBand auth.e2e.spec`.
 
 ## API vs Worker
 

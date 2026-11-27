@@ -1,10 +1,10 @@
-# ChangeRadar Backend — TASKS.md
+﻿# ChangeRadar Backend — TASKS.md
 
 **Application:** Backend API + Background Worker (same repository, separate processes)
 **Version:** 2.1 — Full Roadmap with MVP Scope (development-ready)
 **Architecture:** `backend/ARCHITECTURE.md` (§ numbers below refer to it)
 **Last updated:** 2026-11-27
-**Status:** Phases 1–2 core complete and verified locally (Docker build/compose startup included); staging deployment blocked (see Phase 1). Current phase: Phase 3 (authentication).
+**Status:** Phases 1–3 core complete and verified locally (Docker build/compose startup included); staging deployment blocked (see Phase 1). Current phase: Phase 4 (workspace, membership and authorization).
 
 ---
 
@@ -43,7 +43,7 @@ Tasks were added or sharpened so the gaps closed in `ARCHITECTURE.md` v2.1 are b
 | Milestone | Phases | Result | Status |
 |---|---|---|---|
 | **M0 — Skeleton** | 0–1 | Empty app deployed to staging, CI green | Phases 0–1 core done; staging blocked |
-| **M1 — Core** | 2–7 | Upload two versions → deterministic comparison, deployed | Phase 2 complete; Phases 3–7 not started |
+| **M1 — Core** | 2–7 | Upload two versions → deterministic comparison, deployed | Phases 2–3 complete; Phases 4–7 not started |
 | **M2 — Intelligence** | 8–9 | Review workflow + AI analysis, deployed | Not started |
 | **M3 — Portfolio release** | 10–12 | Invitations, dashboard, demo, hardening, public release | Not started |
 | **Post-MVP** | F1–F9 | Remaining v1 roadmap | Deferred |
@@ -447,27 +447,122 @@ Generated client output (`src/generated/prisma/`) stays git-ignored. New depende
 
 ### Phase 3 — Authentication and Identity
 
-**Goal:** Secure authentication. (§9.1)
+**Goal:** Secure, cookie-based authentication and identity foundations that later phases consume. (§9.1; §17; §18; §24.1–§24.2; §29; §30.1–§30.3)
 
-- [ ] User registration (normalized email, argon2id); creates personal workspace + OWNER membership.
-- [ ] Login with generic `INVALID_CREDENTIALS`.
-- [ ] Access token (JWT, 15 min) + refresh token cookies (§9.1). `cr_access` cookie `Max-Age` = remaining session lifetime; expired JWT with valid signature → `401 TOKEN_EXPIRED`; missing cookie / bad signature → `401 UNAUTHENTICATED`.
-- [ ] `AuthGuard` (global, `@Public()` opt-out) with session revocation check; `@CurrentUser()`.
-- [ ] Refresh token rotation (atomic hash replacement).
-- [ ] Logout (revoke current session).
-- [ ] Session list, revoke one, revoke others.
-- [ ] Account profile retrieval and update.
-- [ ] Password change (revokes other sessions).
-- [ ] Cookie attributes and lifetimes exactly as in the §9.1 cookie table; all auth cookies cleared on logout and on `INVALID_REFRESH_TOKEN` / `SESSION_REVOKED`.
-- [ ] CSRF double-submit protection with **no exemptions** (`CsrfGuard`); `GET /auth/csrf` (`@Public`) issues `cr_csrf`; cookie rotated on register, login, demo and refresh.
-- [ ] Authentication rate limits (Redis throttler).
-- [ ] Expired-session cleanup job (wired in Phase 6).
-- [ ] E2E tests: register → me → refresh → logout; revoked session rejected; reused old refresh token rejected; missing CSRF rejected; 429 on brute force; **login and register without a CSRF header are rejected and succeed after `GET /auth/csrf`; an expired access JWT with the cookie still present returns `TOKEN_EXPIRED` and refresh then succeeds; the access cookie is still sent after the JWT expiry (Max-Age check).**
-- [-] Google OAuth — **Deferred** (Future F1).
-- [-] Email verification — **Deferred** (Future F1).
-- [-] Forgot-password and password reset — **Deferred** (Future F1).
+**Status:** Implemented and verified locally on 2026-11-27 (unit + auth E2E against Postgres/Redis, full quality gate, coverage). Phase 4 is the current phase; staging deployment remains `[!]` blocked (Phase 1).
 
-**Acceptance criteria:** auth flows work end to end; passwords never stored or logged in plaintext; sessions revocable; cookie and CSRF protections work; sensitive endpoints rate-limited.
+**Scope guard:** Phase 3 delivers identity, session/token handling, CSRF and the guards/decorators other modules will reuse. Do **not** add workspace/membership endpoints, permission keys, `WorkspaceGuard` or `PermissionGuard` (Phase 4); uploads/storage (Phase 5); BullMQ queues, cron/schedulers or Worker jobs (Phase 6); business endpoints (Phases 7+); or the demo endpoint (Phase 11). Phase 3 only provides the shared cookie/CSRF helpers and rotation behaviour that `POST /auth/demo` will reuse later. The expired-session cleanup is *designed and unit-tested* here but *wired* in Phase 6. `users` and `sessions` are **global** tables: access them by id/email/token hash through `PrismaService`, not `TenantDb`; tenant-table writes (the personal workspace + OWNER membership created at registration) still go through `TenantDb`. No new error codes — use the §30.2 catalog as already pinned in `error-codes.ts`. Keep the comparison engine directory pure.
+
+#### 3.1 Work breakdown (in implementation order)
+
+**P3-01 — Auth dependencies, secrets and configuration**
+- [x] Add exact-pinned dependencies and record resolved versions in `AGENTS.md`: password hashing (`argon2`, with `@node-rs/argon2` as the documented fallback if the native build fails under Node 26/Docker) and a signed-JWT library (`jsonwebtoken` + `@types/jsonwebtoken`, with `jose` as the fallback if `require(esm)`/Jest rejects it). Refresh tokens and their SHA-256 hashes use Node `crypto` — no extra package. Reuse existing `cookie-parser`, `ioredis` and `class-validator`.
+- [x] Verify install scripts/prebuild downloads against the reproducible `npm ci` allowlist (same scrutiny as `esbuild` in Phase 2); commit `package-lock.json`, keep `save-exact=true`.
+- [x] Confirm the already-validated §17 variables are sufficient: `JWT_ACCESS_SECRET`, `ACCESS_TOKEN_TTL_MINUTES`, `SESSION_TTL_DAYS`, `DEMO_*`. In `env.schema.ts`, fail fast when `NODE_ENV=production` uses a placeholder/blank JWT secret; no new env vars for this phase. Secrets stay in `AppConfigService` only, never logged (Pino redaction already covers tokens/cookies).
+
+**P3-02 — Password hashing (`PasswordHasher`)**
+- [x] Implement argon2id hashing/verification with parameters `m=65536, t=3, p=4` so it **verifies the Phase 2 dev seed hash** of `ChangerRadar-dev-only` in `prisma/seed.ts` (`$argon2id$v=19$m=65536,t=3,p=4$…`); register/login E2E tests use these seeded users.
+- [x] Never store or log plaintext passwords or hashes; no hash in error details or Swagger examples. Unit tests: seed hash verifies, wrong password fails, two hashes of the same password differ.
+
+**P3-03 — Token and cookie services**
+- [x] `TokenService`: sign a 15-minute JWT with `sub` (user id), `sid` (session id) and standard `iat`/`exp`; verify with an explicit branch for **expired but correctly signed → `TOKEN_EXPIRED`** vs **missing/garbled/bad signature → `UNAUTHENTICATED`**. Generate refresh tokens as 32 random bytes (base64url); store only `SHA-256(token)`.
+- [x] `CookieService`: set/clear `cr_access`, `cr_refresh`, `cr_csrf` with the **exact** §9.1 cookie table — HttpOnly per table, `Path=/` for access/CSRF and `/api/v1/auth` for refresh, `SameSite=Lax`, `Secure` when `NODE_ENV=production`, no `Domain`, `Max-Age` = remaining session lifetime (`expires_at - now`) for access + refresh and 30 days for CSRF. Clearing = same name/path with `Max-Age=0`.
+- [x] Rotation helpers: register/login/refresh set both auth cookies and rotate CSRF; logout and `INVALID_REFRESH_TOKEN` / `SESSION_REVOKED` clear all auth cookies. Because `cr_csrf` is readable by JS (non-HttpOnly), the frontend reads the rotated value from `document.cookie`; document this in `README.md`.
+- [x] Unit tests: per-cookie attributes and lifetimes (fake clock), session-lifetime math, JWT expired vs invalid signature, refresh-token entropy/hash stability.
+
+**P3-04 — Users and sessions persistence (global tables)**
+- [x] Add `UsersRepository` / `SessionsRepository` (or one `AuthRepository`) behind `PrismaService`: `findByEmail` (trim + lowercase normalization), `findById`, `create`, session create/list/revoke/rotate. No tenant context; no raw unsafe SQL. Map unique violations to `EMAIL_TAKEN` (409) through the existing `PrismaErrorMapper`.
+- [x] Add a `TenantDb` helper that accepts an **existing transaction client** (e.g. `runInTransaction(tx, ctx, fn)`) so registration can create the user (global) plus the personal workspace and OWNER membership (tenant) **atomically** while centralising every `set_config(..., true)` call in `tenant-db.ts`. If this changes §8.3's contract, update `ARCHITECTURE.md` first. Do not inline `set_config` in auth code — `check:forbidden` enforces this.
+- [x] Store `user_agent` truncated to 500 chars and `ip_address` from the request (trust chain already set by `TRUST_PROXY_HOPS` in Phase 1, verified in Phase 12). Respect the Phase 2 `inet`/`TEXT` divergence recorded in `schema.prisma`.
+
+**P3-05 — CSRF (`CsrfGuard` + `GET /auth/csrf`)**
+- [x] Global `CsrfGuard`: every `POST`/`PUT`/`PATCH`/`DELETE` (i.e. anything other than GET/HEAD/OPTIONS) requires `X-CSRF-Token` to equal the `cr_csrf` cookie via constant-time comparison (`crypto.timingSafeEqual` with a length guard) → `403 CSRF_INVALID` otherwise. **No exemptions — including login, register, refresh and demo.**
+- [x] `GET /auth/csrf` is `@Public`, sets `cr_csrf` only when missing (32 random bytes, base64url, 30-day Max-Age) and returns `{ csrfToken }` using the documented envelope. `@SkipThrottle` only if the global limit would block the bootstrap in practice; record the decision.
+- [x] Document guard order explicitly in `app.module.ts` and test it: `ThrottlerGuard` → `CsrfGuard` → `AuthGuard` (throttle caps brute force first; CSRF gates every state-changing request regardless of auth; AuthGuard resolves the user last). Health/CSRF GET routes remain reachable without auth.
+
+**P3-06 — `AuthGuard` and `@CurrentUser()`**
+- [x] Global `AuthGuard` with `@Public()` opt-out: read `cr_access`, verify JWT via `TokenService`, then check the `sid` session exists, is not revoked and not expired → `401 SESSION_REVOKED`; check user `is_active` → `403 ACCOUNT_INACTIVE`. Attach `req.user = { id, sessionId }`; expose `@CurrentUser()`. Session/user lookups use `PrismaService` only.
+- [x] Unit tests: no cookie / bad signature → `UNAUTHENTICATED`; expired JWT → `TOKEN_EXPIRED`; revoked or expired session → `SESSION_REVOKED`; inactive user → `ACCOUNT_INACTIVE`; `@Public()` bypass; valid request attaches user. Guard coverage ≥ 90%.
+
+**P3-07 — Register, login, logout and rate limits**
+- [x] DTOs with `class-validator` + `@Transform` for email normalization: `RegisterDto { name, email, password }`, `LoginDto { email, password }`; choose and document a minimum password length (e.g. 8). Unknown fields still rejected by the global `ValidationPipe`.
+- [x] `POST /auth/register`: normalize email, hash password, create user + personal workspace + OWNER membership in one transaction (P3-04), create session, set cookies, return the §30.3 User shape (`id`, `name`, `email`). Duplicate email → `409 EMAIL_TAKEN`.
+- [x] `POST /auth/login`: generic `INVALID_CREDENTIALS` for unknown email or wrong password; inactive user with correct password → `ACCOUNT_INACTIVE`; create session + set cookies. No user enumeration in messages or timing-sensitive branches beyond hashing.
+- [x] `POST /auth/logout`: requires auth, revokes the current session, clears all auth cookies.
+- [x] Apply per-route limits with `@Throttle({ global: { limit, ttl } })` on the existing Redis-backed `global` throttler: login 5/min/IP, register 3/min/IP, refresh 30/min/IP. Exceeded → `429 RATE_LIMITED` in the standard envelope.
+
+**P3-08 — Refresh rotation and session management**
+- [x] `POST /auth/refresh`: read `cr_refresh` (path-scoped), hash it, atomically replace `refresh_token_hash` only when it matches the old hash and `revoked_at IS NULL AND expires_at > now()` (`updateMany` conditional `where` + affected-count check, or a parameterised tagged `$executeRaw … RETURNING`); the old token stops working immediately. Missing/unknown hash → `INVALID_REFRESH_TOKEN`; revoked/expired session → `SESSION_REVOKED`; both clear cookies. On success issue a new access JWT + refresh token, rotate CSRF and set cookies with the remaining session lifetime.
+- [x] `GET /auth/sessions` (own active sessions), `DELETE /auth/sessions/:sessionId` (revoke one; clear cookies if it is the current session), `POST /auth/sessions/revoke-others` (keep current). All queries filtered by `user.id`; define and document the session response shape in Swagger (not in §30.3).
+- [x] Unit test concurrent refresh with the same token: exactly one succeeds; the loser gets `INVALID_REFRESH_TOKEN` and cleared cookies.
+
+**P3-09 — Account profile and password change**
+- [x] `GET /auth/me` returns the §30.3 User shape. `PATCH /users/me { name }` updates and returns it. `POST /users/me/password { currentPassword, newPassword }` verifies the current password, rehashes, revokes **all other** active sessions and keeps the current one (no cookie rotation needed). Use a small `UsersModule`/`UsersController` so Phase 4 can extend it.
+- [x] Tests: wrong current password rejected; other sessions then fail with `SESSION_REVOKED`; login works with the new password and rejects the old one.
+
+**P3-10 — Expired-session cleanup (design only)**
+- [x] Add `AuthCleanupService.deleteExpiredSessions(now, limit)` using `PrismaService` with batched deletes on global `sessions` (`expires_at < now`); unit-test with a fixed clock. **Do not register a cron, queue or Worker job in Phase 3** — Phase 6 wires it. Relevant to management endpoints (§21 `maintenance` key) but no scheduler now.
+
+**P3-11 — Tests**
+- [x] Unit tests for `PasswordHasher`, `TokenService`, `CookieService`, `CsrfGuard`, `AuthGuard`, repositories, `AuthCleanupService` and DTO normalization. Guards ≥ 90%, overall ≥ 70%.
+- [x] E2E/integration suite with Supertest + Testcontainers Postgres (reuse Phase 2 roles/migrations/manual SQL helpers) and Redis for the throttler: register → me → refresh → logout; revoked session rejected; reused old refresh token rejected; missing CSRF → `CSRF_INVALID` on login/register/refresh, then success after `GET /auth/csrf`; brute force → `429`; password change revokes other sessions; email case-insensitivity and duplicate → `EMAIL_TAKEN`; registration creates the personal workspace + OWNER membership verified through `TenantDb`.
+- [x] **v2.1 cases:** login/register without the CSRF header are rejected and succeed after `GET /auth/csrf`; an expired access JWT with `cr_access` still present returns `TOKEN_EXPIRED` and refresh then succeeds; `cr_access` `Max-Age` exceeds the JWT TTL so the cookie is still sent after JWT expiry (assert `res.headers['set-cookie']` and cookie replay).
+- [x] Confirm no passwords, tokens or cookies appear in captured logs (Pino redaction), and that the Phase 2 isolation suite still passes unchanged. The auth E2E suite is wired into the CI database job (with a Redis service container).
+
+**P3-12 — Documentation and verification sync**
+- [x] Update `README.md` (auth endpoints, CSRF bootstrap sequence for the frontend, cookie table, dev password, rate limits), `CONTRIBUTING.md` (no plaintext passwords; global vs tenant table access; guard order) and Swagger DTO metadata. Keep `error-codes.ts` unchanged.
+- [x] Run the full gate: `npm ci && npm run lint && npm run format:check && npm run typecheck && npm run check:circular && npm run check:forbidden && npm test && npm run build`, plus the auth E2E suite and `RUN_DB_TESTS=true npm test -- --runInBand test/isolation`. Update `AGENTS.md` "Repository state" with new dependencies/commands and set the current phase to Phase 3 **only after** every item above is verified.
+
+**Deferred (not in this phase):**
+- [x] Google OAuth (`auth_accounts`) — **Deferred** (Future F1).
+- [x] Email verification — **Deferred** (Future F1).
+- [x] Forgot-password and password reset — **Deferred** (Future F1).
+- [x] Refresh-token reuse detection / token family table — **Deferred** (Future §33.4). Do not add reuse detection to rotation beyond "old hash stops working".
+
+#### 3.2 Files to create / modify in Phase 3
+
+```text
+src/modules/auth/{auth.module.ts,auth.controller.ts,auth.service.ts,auth-cleanup.service.ts}
+src/modules/auth/dto/{register.dto.ts,login.dto.ts,cookie-response.dto.ts}
+src/modules/auth/guards/{auth.guard.ts,csrf.guard.ts}
+src/modules/auth/decorators/{public.decorator.ts,current-user.decorator.ts}
+src/modules/auth/services/{token.service.ts,password-hasher.service.ts,cookie.service.ts}
+src/modules/auth/repositories/{users.repository.ts,sessions.repository.ts}
+src/modules/users/{users.module.ts,users.controller.ts,users.service.ts,dto/update-profile.dto.ts,change-password.dto.ts}
+src/infrastructure/database/tenant-db.ts             (add runInTransaction helper)
+src/app.module.ts                                    (named throttlers, global guards, AuthModule, UsersModule)
+src/config/env.schema.ts                             (production JWT secret guard)
+src/common/errors/prisma-error.mapper.ts             (EMAIL_TAKEN mapping)
+package.json  package-lock.json  .env.example
+test/e2e/auth.e2e-spec.ts  test/modules/auth/*.spec.ts  test/setup-env.ts
+README.md  CONTRIBUTING.md  AGENTS.md  docs/TASKS.md
+```
+
+No new error codes, no tenant-table additions, no deferred tables (`auth_accounts`, `verification_tokens`, token families). New dependencies are pinned exactly and recorded in `AGENTS.md`.
+
+#### 3.3 Phase 3 Definition of Done
+
+- Passwords are argon2id-hashed (never plaintext/logged) and the Phase 2 seed password can log in.
+- Register creates the user, personal workspace and OWNER membership atomically; duplicate email → `EMAIL_TAKEN` and no partial rows.
+- `cr_access` outlives its JWT: expired-but-signed → `TOKEN_EXPIRED`, missing/bad signature → `UNAUTHENTICATED`, revoked session → `SESSION_REVOKED`, inactive user → `ACCOUNT_INACTIVE`.
+- Refresh rotation is atomic (one use only), old token rejected, and all auth cookies are cleared on failure paths; session revoke/list/revoke-others and password change work with ownership checks.
+- CSRF double-submit has no exemptions; `GET /auth/csrf` bootstraps the cookie; rotation works on register/login/refresh (and is ready for demo in Phase 11).
+- Cookie attributes/lifetimes match the §9.1 table exactly; guard order is documented and tested.
+- Login/register/refresh are rate-limited via Redis; `429 RATE_LIMITED` uses the standard envelope.
+- Unit + E2E suites and the full quality gate pass; guard coverage ≥ 90%; isolation suite unchanged; docs match reality and only verified items are `[x]`.
+
+#### 3.4 Risks / mitigations
+
+- **Native argon2 build:** verify `argon2` under Node 26 and the Docker image before pinning; keep `@node-rs/argon2`/WASM fallback documented. The chosen library must verify the exact PHC string in `prisma/seed.ts` — test that first.
+- **JWT library ESM/CJS:** the source stays CommonJS via `nodenext` + `require(esm)`; test the signed-JWT library under Jest's `--experimental-vm-modules` before committing, with `jose` as the fallback.
+- **Registration atomicity vs tenant rules:** do not duplicate `set_config` in auth code — extend `TenantDb` with a transaction-client variant; if the §8.3 contract changes, update `ARCHITECTURE.md` first.
+- **Cookie timing:** `Max-Age` must be derived from `sessions.expires_at` with a fake-clock test; a too-short value would hide `TOKEN_EXPIRED` and break the frontend refresh flow (§30 invariant M-11).
+- **CSRF rotation race:** the frontend must read the rotated non-HttpOnly cookie from `document.cookie`; document the sequence and test login/register/refresh with the newly issued cookie, not the stale one.
+- **Guard ordering / brute force:** wrong order can turn `403 CSRF_INVALID` into `401` or let login bypass throttling; assert order in an E2E test.
+- **Client IP:** rely on `TRUST_PROXY_HOPS` (Phase 1) rather than reading forwarded headers directly; staging verification of the visitor IP is Phase 12.
+- **Scope creep:** no workspace/membership endpoints, no demo endpoint, no queues/cron, no deferred auth tables; add later work additively (§32).
+
+**Acceptance criteria:** auth flows work end to end; passwords never stored or logged in plaintext; sessions revocable; cookie and CSRF protections exact to §9.1; sensitive endpoints rate-limited; tenant isolation and all prior quality gates still green.
 
 ### Phase 4 — Workspace, Membership and Authorization
 
@@ -781,5 +876,5 @@ Generated client output (`src/generated/prisma/`) stays git-ignored. New depende
 
 ---
 
-**Current phase:** Phase 2 — Database Foundation and Multi-Tenant Isolation (Phase 1 core complete; staging deferred)
-**Overall status:** Phases 0–1 core complete and verified locally; staging deployment and Docker image build verification are `[!]` blocked in Phase 1; proceed with Phase 2 locally
+**Current phase:** Phase 4 — Workspace, Membership and Authorization (Phases 0–3 core complete; staging deferred)
+**Overall status:** Phases 0–3 core complete and verified locally; staging deployment remains `[!]` blocked in Phase 1; proceed with Phase 4 locally

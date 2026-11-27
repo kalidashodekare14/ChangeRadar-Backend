@@ -8,7 +8,11 @@ import { DatabaseModule } from './infrastructure/database/database.module';
 import { RedisClient } from './infrastructure/redis/redis-client';
 import { RedisModule } from './infrastructure/redis/redis.module';
 import { RedisThrottlerStorage } from './infrastructure/redis/redis-throttler.storage';
+import { AuthGuard } from './modules/auth/guards/auth.guard';
+import { CsrfGuard } from './modules/auth/guards/csrf.guard';
+import { AuthModule } from './modules/auth/auth.module';
 import { HealthModule } from './modules/health/health.module';
+import { UsersModule } from './modules/users/users.module';
 
 @Module({
   imports: [
@@ -25,8 +29,16 @@ import { HealthModule } from './modules/health/health.module';
       }),
     }),
     HealthModule,
+    AuthModule,
+    UsersModule,
   ],
-  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
+  // Guard order matters: throttle caps brute force, CSRF gates every write,
+  // AuthGuard resolves the identity last (§9.1).
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: CsrfGuard },
+    { provide: APP_GUARD, useClass: AuthGuard },
+  ],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {

@@ -1,8 +1,10 @@
 import { Controller, Get } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { AppException } from '../../common/errors/app.exception';
+import { Public } from '../auth/decorators/public.decorator';
 import { HealthService } from './health.service';
 
+@Public()
 @SkipThrottle({ global: true })
 @Controller('health')
 export class HealthController {

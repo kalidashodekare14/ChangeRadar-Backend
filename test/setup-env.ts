@@ -1,5 +1,19 @@
 // Deterministic environment for unit/bootstrap tests (CI has no .env file).
 import 'reflect-metadata';
+import { readFileSync } from 'node:fs';
+import { parse } from 'dotenv';
+
+// DB-backed tests use the local .env when present; CI injects its own URLs.
+// This must happen here because ConfigModule validates env at import time.
+if (process.env.RUN_DB_TESTS === 'true') {
+  try {
+    const local = parse(readFileSync('.env', 'utf8'));
+    if (local.DATABASE_URL) process.env.DATABASE_URL = local.DATABASE_URL;
+    if (local.DIRECT_DATABASE_URL) process.env.DIRECT_DATABASE_URL = local.DIRECT_DATABASE_URL;
+  } catch {
+    // No .env file — injected environment remains authoritative.
+  }
+}
 
 process.env.NODE_ENV ??= 'test';
 process.env.APP_URL ??= 'http://localhost:3000';

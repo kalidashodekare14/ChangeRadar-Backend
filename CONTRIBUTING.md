@@ -76,6 +76,8 @@ Also verify the relevant runtime path (API, Worker, infrastructure) for the phas
 
 - HTTP DTOs use `class-validator` + `class-transformer` because Nest's `ValidationPipe` implements `whitelist`/`forbidNonWhitelisted`. Add validators to every exposed field.
 - Zod is used for environment validation (`src/config/env.schema.ts`), and later for BullMQ job payloads and AI output. Do not read `process.env` outside the config module.
+- Auth DTOs normalize emails (trim + lowercase). Login passwords are not length-validated so wrong credentials stay `INVALID_CREDENTIALS`; registration/change-password enforce the documented minimum.
+- Jest matchers and supertest bodies are `any`, so the strict `no-unsafe-*` / `unbound-method` rules are relaxed for `test/**/*.ts` only — production `src/**` stays strict.
 - Paginated handlers return `paginate(items, { page, pageSize, total })` so the global interceptor adds `meta`.
 - Domain errors throw `AppException` with a code from the §30.2 catalog; never invent ad-hoc error codes.
 
@@ -86,3 +88,6 @@ Also verify the relevant runtime path (API, Worker, infrastructure) for the phas
 - Local RustFS/PostgreSQL/Redis credentials are development-only defaults.
 - Presigned URLs are signed for `S3_PUBLIC_ENDPOINT`; server-side calls use `S3_ENDPOINT`.
 - Do not log request bodies that may contain passwords, tokens or document text.
+- Passwords are argon2id hashes only; `PasswordHasher` is the sole place that hashes/verifies them. Refresh tokens are stored as SHA-256 hashes and never returned except at rotation.
+- CSRF double-submit has no exemptions: every non-GET/HEAD/OPTIONS route needs `X-CSRF-Token` matching `cr_csrf`, including login/register/refresh. Never add a route that skips `CsrfGuard` without an architecture change.
+- `users`/`sessions` are global tables accessed through repositories/prisma, not `TenantDb`; tenant writes during registration must use `TenantDb.runInTransaction(tx, ...)` inside the same Prisma transaction.
