@@ -1,0 +1,505 @@
+// ChangeRadar MVP schema — 15 tables, 14 MVP enums (ARCHITECTURE Part C).
+// Prisma Migrate owns tables/relations/standard constraints; helper functions,
+// RLS policies, CHECK constraints and grants are applied as manual SQL in
+// prisma/migrations/manual/ (see §29).
+
+generator client {
+  provider        = "prisma-client"
+  output          = "../src/generated/prisma"
+  moduleFormat    = "cjs"
+  previewFeatures = ["partialIndexes"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ── Enums (§23) ─────────────────────────────────────────────────────────────
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+
+  @@map("workspace_role")
+}
+
+enum WorkspaceStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+
+  @@map("workspace_status")
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+
+  @@map("invitation_status")
+}
+
+enum DocumentStatus {
+  ACTIVE
+  ARCHIVED
+  DELETED
+
+  @@map("document_status")
+}
+
+enum DocumentProcessingStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+
+  @@map("document_processing_status")
+}
+
+enum FileStatus {
+  PENDING
+  AVAILABLE
+  FAILED
+  DELETING
+  DELETED
+
+  @@map("file_status")
+}
+
+enum ComparisonStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+
+  @@map("comparison_status")
+}
+
+enum ChangeCategory {
+  ADDED
+  REMOVED
+  MODIFIED
+  STRUCTURAL
+  SEMANTIC
+  FORMATTING
+
+  @@map("change_category")
+}
+
+enum ChangeSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+
+  @@map("change_severity")
+}
+
+enum ReviewStatus {
+  UNREVIEWED
+  REVIEWED
+  NEEDS_ATTENTION
+  IGNORED
+
+  @@map("review_status")
+}
+
+enum AiAnalysisStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+
+  @@map("ai_analysis_status")
+}
+
+enum AiInsightType {
+  EXPLANATION
+  BUSINESS_IMPACT
+  RISK
+  RECOMMENDATION
+  SUMMARY
+
+  @@map("ai_insight_type")
+}
+
+enum ProcessingType {
+  DOCUMENT_EXTRACTION
+  COMPARISON
+  AI_ANALYSIS
+  REPORT_GENERATION
+
+  @@map("processing_type")
+}
+
+enum ProcessingStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+
+  @@map("processing_status")
+}
+
+// ── Global tables (§24.1–§24.2, no workspace RLS) ───────────────────────────
+
+model User {
+  id               String                @id @db.Uuid
+  name             String                @db.VarChar(150)
+  email            String                @unique @db.VarChar(255)
+  passwordHash     String?               @map("password_hash")
+  emailVerifiedAt  DateTime?             @map("email_verified_at") @db.Timestamptz
+  avatarUrl        String?               @map("avatar_url")
+  isActive         Boolean               @default(true) @map("is_active")
+  isDemo           Boolean               @default(false) @map("is_demo")
+  createdAt        DateTime              @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime              @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  sessions         Session[]
+  memberships      WorkspaceMember[]
+  invitations      WorkspaceInvitation[]
+  documents        Document[]            @relation("DocumentCreatedBy")
+  storedFiles      StoredFile[]          @relation("StoredFileCreatedBy")
+  uploadedVersions DocumentVersion[]     @relation("DocumentVersionUploadedBy")
+  comparisonRuns   ComparisonRun[]       @relation("ComparisonRunCreatedBy")
+  reviews          ChangeReview[]        @relation("ChangeReviewReviewer")
+
+  @@map("users")
+}
+
+model Session {
+  id               String               @id @db.Uuid
+  userId           String               @map("user_id") @db.Uuid
+  refreshTokenHash String               @unique @map("refresh_token_hash")
+  expiresAt        DateTime             @map("expires_at") @db.Timestamptz
+  revokedAt        DateTime?            @map("revoked_at") @db.Timestamptz
+  lastUsedAt       DateTime?            @map("last_used_at") @db.Timestamptz
+  userAgent        String?              @map("user_agent")
+  ipAddress        Unsupported("inet")? @map("ip_address")
+  createdAt        DateTime             @default(now()) @map("created_at") @db.Timestamptz
+  user             User                 @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([userId, expiresAt], map: "sessions_user_id_expires_at_idx")
+  @@index([expiresAt], map: "sessions_expires_at_idx")
+  @@index([userId], map: "sessions_user_id_active_idx", where: { revokedAt: null })
+  @@map("sessions")
+}
+
+// ── Tenant tables (§24.3–§24.15) ────────────────────────────────────────────
+
+model Workspace {
+  id                String                @id @db.Uuid
+  name              String                @db.VarChar(150)
+  slug              String                @unique @db.VarChar(180)
+  status            WorkspaceStatus       @default(ACTIVE)
+  settings          Json                  @default("{}") @db.JsonB
+  createdAt         DateTime              @map("created_at") @db.Timestamptz
+  updatedAt         DateTime              @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt         DateTime?             @map("deleted_at") @db.Timestamptz
+  members           WorkspaceMember[]
+  invitations       WorkspaceInvitation[]
+  documents         Document[]            @relation("WorkspaceDocuments")
+  storedFiles       StoredFile[]          @relation("WorkspaceStoredFiles")
+  processingRecords ProcessingRecord[]
+
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  id          String        @id @db.Uuid
+  workspaceId String        @map("workspace_id") @db.Uuid
+  userId      String        @map("user_id") @db.Uuid
+  role        WorkspaceRole @default(MEMBER)
+  joinedAt    DateTime      @default(now()) @map("joined_at") @db.Timestamptz
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  user        User          @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([workspaceId, userId], map: "workspace_members_workspace_id_user_id_key")
+  @@unique([workspaceId, id], map: "workspace_members_workspace_id_id_key")
+  @@index([userId], map: "workspace_members_user_id_idx")
+  @@index([workspaceId, role], map: "workspace_members_workspace_id_role_idx")
+  @@map("workspace_members")
+}
+
+model WorkspaceInvitation {
+  id          String           @id @db.Uuid
+  workspaceId String           @map("workspace_id") @db.Uuid
+  email       String           @db.VarChar(255)
+  role        WorkspaceRole    @default(MEMBER)
+  tokenHash   String           @unique @map("token_hash")
+  status      InvitationStatus @default(PENDING)
+  expiresAt   DateTime         @default(dbgenerated("(now() + interval '7 days')")) @map("expires_at") @db.Timestamptz
+  maxUses     Int              @default(1) @map("max_uses")
+  usedCount   Int              @default(0) @map("used_count")
+  invitedBy   String           @map("invited_by") @db.Uuid
+  acceptedAt  DateTime?        @map("accepted_at") @db.Timestamptz
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime         @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  inviter     User             @relation(fields: [invitedBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([workspaceId, id], map: "workspace_invitations_workspace_id_id_key")
+  @@index([workspaceId, status], map: "workspace_invitations_workspace_id_status_idx")
+  @@index([workspaceId, email], map: "workspace_invitations_workspace_id_email_idx")
+  @@index([expiresAt], map: "workspace_invitations_expires_at_idx")
+  @@map("workspace_invitations")
+}
+
+model Document {
+  id          String            @id @db.Uuid
+  workspaceId String            @map("workspace_id") @db.Uuid
+  title       String            @db.VarChar(255)
+  description String?
+  status      DocumentStatus    @default(ACTIVE)
+  createdBy   String            @map("created_by") @db.Uuid
+  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt   DateTime?         @map("deleted_at") @db.Timestamptz
+  workspace   Workspace         @relation("WorkspaceDocuments", fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  creator     User              @relation("DocumentCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  versions    DocumentVersion[]
+  comparisons ComparisonRun[]
+
+  @@unique([workspaceId, id], map: "documents_workspace_id_id_key")
+  @@index([workspaceId, createdAt(sort: Desc)], map: "documents_workspace_id_created_at_idx")
+  @@index([workspaceId, status], map: "documents_workspace_id_status_idx")
+  @@map("documents")
+}
+
+model StoredFile {
+  id               String            @id @db.Uuid
+  workspaceId      String            @map("workspace_id") @db.Uuid
+  storageProvider  String            @map("storage_provider") @db.VarChar(50)
+  bucketName       String            @map("bucket_name") @db.VarChar(255)
+  storageKey       String            @map("storage_key")
+  originalFilename String            @map("original_filename") @db.VarChar(255)
+  mimeType         String            @map("mime_type") @db.VarChar(150)
+  fileExtension    String            @map("file_extension") @db.VarChar(20)
+  fileSize         BigInt            @map("file_size")
+  checksumSha256   String            @map("checksum_sha256") @db.Char(64)
+  status           FileStatus        @default(PENDING)
+  createdBy        String            @map("created_by") @db.Uuid
+  createdAt        DateTime          @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  workspace        Workspace         @relation("WorkspaceStoredFiles", fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  creator          User              @relation("StoredFileCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  versions         DocumentVersion[]
+
+  @@unique([storageProvider, bucketName, storageKey], map: "stored_files_storage_provider_bucket_name_storage_key_key")
+  @@unique([workspaceId, id], map: "stored_files_workspace_id_id_key")
+  @@index([workspaceId, checksumSha256], map: "stored_files_workspace_id_checksum_sha256_idx")
+  @@index([workspaceId, status], map: "stored_files_workspace_id_status_idx")
+  @@map("stored_files")
+}
+
+model DocumentVersion {
+  id                 String                   @id @db.Uuid
+  workspaceId        String                   @map("workspace_id") @db.Uuid
+  documentId         String                   @map("document_id") @db.Uuid
+  storedFileId       String                   @map("stored_file_id") @db.Uuid
+  versionNumber      Int                      @map("version_number")
+  originalFilename   String                   @map("original_filename") @db.VarChar(255)
+  mimeType           String                   @map("mime_type") @db.VarChar(150)
+  fileSize           BigInt                   @map("file_size")
+  checksumSha256     String                   @map("checksum_sha256") @db.Char(64)
+  extractedText      String?                  @map("extracted_text")
+  extractionMetadata Json?                    @map("extraction_metadata") @db.JsonB
+  processingStatus   DocumentProcessingStatus @default(PENDING) @map("processing_status")
+  uploadedBy         String                   @map("uploaded_by") @db.Uuid
+  uploadTokenId      String?                  @map("upload_token_id") @db.Uuid
+  createdAt          DateTime                 @default(now()) @map("created_at") @db.Timestamptz
+  document           Document                 @relation(fields: [workspaceId, documentId], references: [workspaceId, id], onDelete: Restrict, onUpdate: Cascade)
+  storedFile         StoredFile               @relation(fields: [workspaceId, storedFileId], references: [workspaceId, id], onDelete: Restrict, onUpdate: Cascade)
+  uploader           User                     @relation("DocumentVersionUploadedBy", fields: [uploadedBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  sourceComparisons  ComparisonRun[]          @relation("ComparisonSourceVersion")
+  targetComparisons  ComparisonRun[]          @relation("ComparisonTargetVersion")
+  evidence           ChangeEvidence[]
+
+  @@unique([workspaceId, documentId, versionNumber], map: "document_versions_workspace_id_document_id_version_number_key")
+  @@unique([workspaceId, id], map: "document_versions_workspace_id_id_key")
+  @@unique([workspaceId, documentId, id], map: "document_versions_workspace_id_document_id_id_key")
+  @@unique([workspaceId, uploadTokenId], map: "document_versions_workspace_id_upload_token_id_key", where: { uploadTokenId: { not: null } })
+  @@index([workspaceId, documentId, versionNumber(sort: Desc)], map: "document_versions_workspace_id_document_id_version_number_idx")
+  @@index([workspaceId, processingStatus], map: "document_versions_workspace_id_processing_status_idx")
+  @@map("document_versions")
+}
+
+model ComparisonRun {
+  id              String             @id @db.Uuid
+  workspaceId     String             @map("workspace_id") @db.Uuid
+  documentId      String             @map("document_id") @db.Uuid
+  sourceVersionId String             @map("source_version_id") @db.Uuid
+  targetVersionId String             @map("target_version_id") @db.Uuid
+  status          ComparisonStatus   @default(QUEUED)
+  engineVersion   String             @map("engine_version") @db.VarChar(50)
+  configuration   Json?              @db.JsonB
+  errorCode       String?            @map("error_code") @db.VarChar(100)
+  errorMessage    String?            @map("error_message")
+  startedAt       DateTime?          @map("started_at") @db.Timestamptz
+  completedAt     DateTime?          @map("completed_at") @db.Timestamptz
+  createdBy       String             @map("created_by") @db.Uuid
+  createdAt       DateTime           @default(now()) @map("created_at") @db.Timestamptz
+  document        Document           @relation(fields: [workspaceId, documentId], references: [workspaceId, id], onDelete: Restrict, onUpdate: Cascade)
+  sourceVersion   DocumentVersion    @relation("ComparisonSourceVersion", fields: [workspaceId, documentId, sourceVersionId], references: [workspaceId, documentId, id], onDelete: Restrict, onUpdate: Cascade)
+  targetVersion   DocumentVersion    @relation("ComparisonTargetVersion", fields: [workspaceId, documentId, targetVersionId], references: [workspaceId, documentId, id], onDelete: Restrict, onUpdate: Cascade)
+  creator         User               @relation("ComparisonRunCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  changes         ComparisonChange[]
+  analyses        AiAnalysis[]
+
+  @@unique([workspaceId, id], map: "comparison_runs_workspace_id_id_key")
+  @@index([workspaceId, createdAt(sort: Desc)], map: "comparison_runs_workspace_id_created_at_idx")
+  @@index([documentId, createdAt(sort: Desc)], map: "comparison_runs_document_id_created_at_idx")
+  @@index([workspaceId, status], map: "comparison_runs_workspace_id_status_idx")
+  @@index([sourceVersionId], map: "comparison_runs_source_version_id_idx")
+  @@index([targetVersionId], map: "comparison_runs_target_version_id_idx")
+  @@map("comparison_runs")
+}
+
+model ComparisonChange {
+  id              String           @id @db.Uuid
+  workspaceId     String           @map("workspace_id") @db.Uuid
+  comparisonRunId String           @map("comparison_run_id") @db.Uuid
+  sequenceNumber  Int              @map("sequence_number")
+  category        ChangeCategory
+  severity        ChangeSeverity?
+  oldText         String?          @map("old_text")
+  newText         String?          @map("new_text")
+  oldLocation     Json?            @map("old_location") @db.JsonB
+  newLocation     Json?            @map("new_location") @db.JsonB
+  fingerprint     String?          @db.VarChar(128)
+  metadata        Json?            @db.JsonB
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  run             ComparisonRun    @relation(fields: [workspaceId, comparisonRunId], references: [workspaceId, id], onDelete: Cascade, onUpdate: Cascade)
+  evidence        ChangeEvidence[]
+  review          ChangeReview?
+  // ai_insights -> comparison_changes FK is added in manual SQL (optional composite FK).
+
+  @@unique([comparisonRunId, sequenceNumber], map: "comparison_changes_comparison_run_id_sequence_number_key")
+  @@unique([workspaceId, id], map: "comparison_changes_workspace_id_id_key")
+  @@index([workspaceId, comparisonRunId], map: "comparison_changes_workspace_id_comparison_run_id_idx")
+  @@index([comparisonRunId, category], map: "comparison_changes_comparison_run_id_category_idx")
+  @@index([comparisonRunId, severity], map: "comparison_changes_comparison_run_id_severity_idx")
+  @@map("comparison_changes")
+}
+
+model ChangeEvidence {
+  id                 String           @id @db.Uuid
+  workspaceId        String           @map("workspace_id") @db.Uuid
+  comparisonChangeId String           @map("comparison_change_id") @db.Uuid
+  evidenceType       String           @map("evidence_type") @db.VarChar(50)
+  sourceVersionId    String           @map("source_version_id") @db.Uuid
+  pageNumber         Int?             @map("page_number")
+  sectionPath        String?          @map("section_path")
+  startOffset        BigInt?          @map("start_offset")
+  endOffset          BigInt?          @map("end_offset")
+  excerpt            String?
+  metadata           Json?            @db.JsonB
+  createdAt          DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  change             ComparisonChange @relation(fields: [workspaceId, comparisonChangeId], references: [workspaceId, id], onDelete: Cascade, onUpdate: Cascade)
+  sourceVersion      DocumentVersion  @relation(fields: [workspaceId, sourceVersionId], references: [workspaceId, id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([workspaceId, id], map: "change_evidence_workspace_id_id_key")
+  @@index([workspaceId, comparisonChangeId], map: "change_evidence_workspace_id_comparison_change_id_idx")
+  @@index([sourceVersionId], map: "change_evidence_source_version_id_idx")
+  @@map("change_evidence")
+}
+
+model ChangeReview {
+  id                 String           @id @db.Uuid
+  workspaceId        String           @map("workspace_id") @db.Uuid
+  comparisonChangeId String           @unique @map("comparison_change_id") @db.Uuid
+  status             ReviewStatus     @default(UNREVIEWED)
+  reviewedBy         String?          @map("reviewed_by") @db.Uuid
+  reviewedAt         DateTime?        @map("reviewed_at") @db.Timestamptz
+  note               String?
+  createdAt          DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime         @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  change             ComparisonChange @relation(fields: [workspaceId, comparisonChangeId], references: [workspaceId, id], onDelete: Cascade, onUpdate: Cascade)
+  reviewer           User?            @relation("ChangeReviewReviewer", fields: [reviewedBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([workspaceId, id], map: "change_reviews_workspace_id_id_key")
+  @@unique([workspaceId, comparisonChangeId], map: "change_reviews_workspace_id_comparison_change_id_key")
+  @@index([workspaceId, status], map: "change_reviews_workspace_id_status_idx")
+  @@index([workspaceId, reviewedBy], map: "change_reviews_workspace_id_reviewed_by_idx")
+  @@map("change_reviews")
+}
+
+model AiAnalysis {
+  id                  String           @id @db.Uuid
+  workspaceId         String           @map("workspace_id") @db.Uuid
+  comparisonRunId     String           @map("comparison_run_id") @db.Uuid
+  status              AiAnalysisStatus @default(QUEUED)
+  provider            String           @db.VarChar(80)
+  model               String           @db.VarChar(120)
+  promptVersion       String           @map("prompt_version") @db.VarChar(80)
+  analyzedChangeCount Int?             @map("analyzed_change_count")
+  inputTokens         BigInt?          @map("input_tokens")
+  outputTokens        BigInt?          @map("output_tokens")
+  estimatedCost       Decimal?         @map("estimated_cost") @db.Decimal(12, 6)
+  errorCode           String?          @map("error_code") @db.VarChar(100)
+  startedAt           DateTime?        @map("started_at") @db.Timestamptz
+  completedAt         DateTime?        @map("completed_at") @db.Timestamptz
+  createdAt           DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  run                 ComparisonRun    @relation(fields: [workspaceId, comparisonRunId], references: [workspaceId, id], onDelete: Restrict, onUpdate: Cascade)
+  insights            AiInsight[]
+
+  @@unique([workspaceId, id], map: "ai_analyses_workspace_id_id_key")
+  @@index([workspaceId, comparisonRunId, createdAt(sort: Desc)], map: "ai_analyses_workspace_id_comparison_run_id_created_at_idx")
+  @@index([workspaceId, status], map: "ai_analyses_workspace_id_status_idx")
+  @@map("ai_analyses")
+}
+
+model AiInsight {
+  id                 String          @id @db.Uuid
+  workspaceId        String          @map("workspace_id") @db.Uuid
+  aiAnalysisId       String          @map("ai_analysis_id") @db.Uuid
+  comparisonChangeId String?         @map("comparison_change_id") @db.Uuid
+  type               AiInsightType
+  title              String?         @db.VarChar(255)
+  content            String
+  severity           ChangeSeverity?
+  confidenceScore    Decimal?        @map("confidence_score") @db.Decimal(5, 4)
+  isUncertain        Boolean         @default(false) @map("is_uncertain")
+  evidenceReferences Json?           @map("evidence_references") @db.JsonB
+  createdAt          DateTime        @default(now()) @map("created_at") @db.Timestamptz
+  analysis           AiAnalysis      @relation(fields: [workspaceId, aiAnalysisId], references: [workspaceId, id], onDelete: Cascade, onUpdate: Cascade)
+  // The optional same-workspace FK to comparison_changes is added in manual
+  // SQL: Prisma requires all fields of an optional composite FK to be nullable,
+  // but workspace_id is intentionally NOT NULL.
+
+  @@unique([workspaceId, id], map: "ai_insights_workspace_id_id_key")
+  @@index([workspaceId, aiAnalysisId], map: "ai_insights_workspace_id_ai_analysis_id_idx")
+  @@index([workspaceId, comparisonChangeId], map: "ai_insights_workspace_id_comparison_change_id_idx")
+  @@index([aiAnalysisId, type], map: "ai_insights_ai_analysis_id_type_idx")
+  @@map("ai_insights")
+}
+
+model ProcessingRecord {
+  id           String           @id @db.Uuid
+  workspaceId  String           @map("workspace_id") @db.Uuid
+  jobId        String           @unique @map("job_id") @db.VarChar(255)
+  type         ProcessingType
+  status       ProcessingStatus @default(QUEUED)
+  resourceType String           @map("resource_type") @db.VarChar(80)
+  resourceId   String           @map("resource_id") @db.Uuid
+  attemptCount Int              @default(0) @map("attempt_count")
+  maxAttempts  Int              @default(3) @map("max_attempts")
+  errorCode    String?          @map("error_code") @db.VarChar(100)
+  startedAt    DateTime?        @map("started_at") @db.Timestamptz
+  completedAt  DateTime?        @map("completed_at") @db.Timestamptz
+  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime         @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+  workspace    Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([workspaceId, id], map: "processing_records_workspace_id_id_key")
+  @@index([workspaceId, status, createdAt], map: "processing_records_workspace_id_status_created_at_idx")
+  @@index([workspaceId, resourceType, resourceId], map: "processing_records_workspace_id_resource_type_resource_id_idx")
+  @@map("processing_records")
+}

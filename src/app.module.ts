@@ -4,6 +4,7 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { LoggingModule } from './common/logging/logging.module';
 import { CorrelationIdMiddleware } from './common/middleware/correlation-id.middleware';
 import { AppConfigModule } from './config/config.module';
+import { DatabaseModule } from './infrastructure/database/database.module';
 import { RedisClient } from './infrastructure/redis/redis-client';
 import { RedisModule } from './infrastructure/redis/redis.module';
 import { RedisThrottlerStorage } from './infrastructure/redis/redis-throttler.storage';
@@ -13,6 +14,7 @@ import { HealthModule } from './modules/health/health.module';
   imports: [
     AppConfigModule,
     LoggingModule.forRoot(),
+    DatabaseModule,
     RedisModule,
     ThrottlerModule.forRootAsync({
       imports: [RedisModule],

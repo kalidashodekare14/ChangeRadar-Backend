@@ -57,7 +57,7 @@ npm test
 npm run build
 ```
 
-CI runs the same commands in this order: lint → format → typecheck → boundary checks → unit tests → build → runtime-only `npm audit`. Phase 2 extends it with migrations on an empty database, integration and tenant-isolation suites.
+CI runs the same commands in this order: lint → format → typecheck → boundary checks → unit tests → build → runtime-only `npm audit`, plus a database job: roles → migrations on an empty database → manual SQL → tenant-isolation suite → build.
 
 Also verify the relevant runtime path (API, Worker, infrastructure) for the phase you changed.
 
@@ -65,7 +65,7 @@ Also verify the relevant runtime path (API, Worker, infrastructure) for the phas
 
 - [ ] The change belongs to the current phase and respects the MVP scope.
 - [ ] `ARCHITECTURE.md` was updated first for any design change.
-- [ ] Tenant isolation rules are respected (tenant tables only through `TenantDb` once Phase 2 lands).
+- [ ] Tenant isolation rules are respected: tenant tables only through `TenantDb.run()`, no session-level `SET app.`, no `$queryRawUnsafe`/`$executeRawUnsafe`, and no external I/O inside a tenant transaction.
 - [ ] Authorization is enforced in the backend; client-supplied workspace IDs are never trusted.
 - [ ] No secrets, tokens, cookies, document text, prompts or presigned URLs are logged or committed.
 - [ ] Error codes come from the documented catalog.

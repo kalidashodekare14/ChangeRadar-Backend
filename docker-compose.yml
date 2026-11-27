@@ -89,8 +89,8 @@ services:
       PORT: 4000
       APP_URL: ${APP_URL:-http://localhost:3000}
       # Container-internal endpoints override the host values from .env.
-      DATABASE_URL: postgresql://${POSTGRES_USER:-changeradar}:${POSTGRES_PASSWORD:-changeradar}@postgres:5432/${POSTGRES_DB:-changeradar}?schema=public
-      DIRECT_DATABASE_URL: postgresql://${POSTGRES_USER:-changeradar}:${POSTGRES_PASSWORD:-changeradar}@postgres:5432/${POSTGRES_DB:-changeradar}?schema=public
+      DATABASE_URL: postgresql://changeradar_app:${APP_PASSWORD:-change-me-app}@postgres:5432/${POSTGRES_DB:-changeradar}?schema=public
+      DIRECT_DATABASE_URL: postgresql://changeradar_migrator:${MIGRATOR_PASSWORD:-change-me-migrator}@postgres:5432/${POSTGRES_DB:-changeradar}?schema=public
       REDIS_URL: redis://redis:6379
       S3_ENDPOINT: http://storage:9000
       S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
@@ -132,8 +132,8 @@ services:
         required: false
     environment:
       NODE_ENV: ${NODE_ENV:-development}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-changeradar}:${POSTGRES_PASSWORD:-changeradar}@postgres:5432/${POSTGRES_DB:-changeradar}?schema=public
-      DIRECT_DATABASE_URL: postgresql://${POSTGRES_USER:-changeradar}:${POSTGRES_PASSWORD:-changeradar}@postgres:5432/${POSTGRES_DB:-changeradar}?schema=public
+      DATABASE_URL: postgresql://changeradar_app:${APP_PASSWORD:-change-me-app}@postgres:5432/${POSTGRES_DB:-changeradar}?schema=public
+      DIRECT_DATABASE_URL: postgresql://changeradar_migrator:${MIGRATOR_PASSWORD:-change-me-migrator}@postgres:5432/${POSTGRES_DB:-changeradar}?schema=public
       REDIS_URL: redis://redis:6379
       S3_ENDPOINT: http://storage:9000
     depends_on:

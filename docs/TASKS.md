@@ -4,7 +4,7 @@
 **Version:** 2.1 — Full Roadmap with MVP Scope (development-ready)
 **Architecture:** `backend/ARCHITECTURE.md` (§ numbers below refer to it)
 **Last updated:** 2026-11-27
-**Status:** Phase 1 core complete and verified locally; staging deployment and Docker image build verification blocked (see Phase 1)
+**Status:** Phases 1–2 core complete and verified locally (Docker build/compose startup included); staging deployment blocked (see Phase 1). Current phase: Phase 3 (authentication).
 
 ---
 
@@ -43,7 +43,7 @@ Tasks were added or sharpened so the gaps closed in `ARCHITECTURE.md` v2.1 are b
 | Milestone | Phases | Result | Status |
 |---|---|---|---|
 | **M0 — Skeleton** | 0–1 | Empty app deployed to staging, CI green | Phases 0–1 core done; staging blocked |
-| **M1 — Core** | 2–7 | Upload two versions → deterministic comparison, deployed | Not started |
+| **M1 — Core** | 2–7 | Upload two versions → deterministic comparison, deployed | Phase 2 complete; Phases 3–7 not started |
 | **M2 — Intelligence** | 8–9 | Review workflow + AI analysis, deployed | Not started |
 | **M3 — Portfolio release** | 10–12 | Invitations, dashboard, demo, hardening, public release | Not started |
 | **Post-MVP** | F1–F9 | Remaining v1 roadmap | Deferred |
@@ -213,7 +213,7 @@ test/e2e/  test/isolation/  test/fixtures/documents/
 
 **Goal:** Reusable backend foundation + first deployment. (§10, §17, §18, §19, §21, §30.2)
 
-**Status:** Implemented and verified locally on 2026-11-27. Remaining gaps: staging deployment is `[!]` blocked (no provider decision/credentials) and the Docker image build is unverified because the local Docker daemon was unavailable. Proceed to Phase 2 locally; return to staging when access exists.
+**Status:** Implemented and verified locally on 2026-11-27, including the Docker image build and compose API/Worker startup. Remaining gap: staging deployment is `[!]` blocked (no provider decision/credentials). Return to staging when access exists.
 
 **Scope guard:** Phase 1 adds cross-cutting infrastructure only. Do **not** add a Prisma schema/migrations/models, auth flows, CSRF, tenant context/RLS, BullMQ queues, storage adapters, extractors, comparison engine logic, AI code, business endpoints or feature DTOs — those belong to Phases 2–12. Readiness checks stay lightweight dependency probes; deep, authenticated checks are tightened when the actual `PrismaService`, Redis and storage providers land in Phases 2/5. The comparison engine directory stays pure.
 
@@ -268,7 +268,7 @@ test/e2e/  test/isolation/  test/fixtures/documents/
 **P1-09 — Multi-stage Dockerfile and Compose services (§21)**
 - [x] `.dockerignore`; multi-stage `Dockerfile`: pinned Node 26 image → `npm ci` → build → non-root runtime image with production dependencies only. Two commands from one image: `node dist/main.js` (API) and `node dist/worker.js` (Worker). No migrations at startup.
 - [x] Extend `docker-compose.yml` with `api` and `worker` services using the same image/build, optional `.env` file, `depends_on` health conditions, API port `4000`, Worker with no published port; healthcheck against `/api/v1/health`.
-- [!] Blocked: `docker compose config` validates and both Node commands run locally, but `docker compose up -d --build` could not be verified — the local Docker daemon was not running. Re-run image build/startup when Docker Desktop is available.
+- [x] Verified 2026-11-27: after starting Docker Desktop, `docker compose config`, `docker compose up -d --build api worker`, both container commands, `/api/v1/health` and `/api/v1/health/ready` (database/redis/storage up) all pass.
 
 **P1-10 — GitHub Actions CI (§21, §18)**
 - [x] `.github/workflows/ci.yml` on push/PR: `npm ci` (Node 26.13.0 / npm 11.20.0, lockfile cache) → lint → format check → typecheck → `check:circular` + `check:forbidden` → unit tests → build. Phase 2 extends the same workflow with migrations on an empty DB → integration + isolation → build.
@@ -309,7 +309,7 @@ All new dependencies are installed with exact versions (`save-exact=true`) and t
 - `GET /api/v1/health` returns the success envelope; `/api/v1/health/ready` reports PostgreSQL/Redis/storage and 503 on failure; `/api/docs` toggles with `SWAGGER_ENABLED`.
 - Validation rejects unknown fields with 422 `VALIDATION_ERROR` + `details` + `correlationId`; no stack traces in production responses.
 - Logs are JSON with correlation IDs and pass redaction review (no secrets, cookies, tokens, document text or presigned URLs).
-- Dockerfile and compose services exist and `docker compose config` validates; API/Worker commands run locally. Docker image build/compose startup remains `[!]` blocked (daemon unavailable) and must be re-verified.
+- Dockerfile and compose services exist; `docker compose config`, image build and compose API/Worker startup are verified with health/readiness green.
 - CI commands are green locally in the documented order; staging smoke test is explicitly `[!]` blocked.
 - Documentation matches reality; only verified items are `[x]`.
 
@@ -328,34 +328,120 @@ All new dependencies are installed with exact versions (`save-exact=true`) and t
 
 ### Phase 2 — Database Foundation and Multi-Tenant Isolation ⭐
 
-**Goal:** Implement the MVP schema and prove tenant isolation. (Part C, §8)
+**Goal:** Implement the MVP schema and prove tenant isolation. (Part C, §22–§29; §8; §20)
 
-**Schema**
-- [ ] Review ARCHITECTURE Part C completely.
-- [ ] Write `schema.prisma` for the 15 MVP tables and their enums (§23–§24), including the v2.1 additions: `document_versions.upload_token_id` (+ partial unique index) and `ai_analyses.analyzed_change_count`.
-- [ ] Verify every column, PK, FK, unique, check constraint and index against §24.
-- [ ] Implement composite foreign keys (§25), including three-column same-document FKs.
-- [ ] Verify delete behaviour (§26).
-- [ ] Configure Prisma `url` (runtime role) and `directUrl` (migrator role).
-- [ ] Generate the initial migration and review the SQL.
+**Status:** Implemented and verified locally on 2026-11-27 (schema generate, migrations on an empty DB, manual SQL, idempotent seed, all 10 DB-level isolation cases as the runtime role, full quality gate). The hosted CI database job is configured but has not been triggered; Phase 1 staging remains the only `[!]` item. Proceed to Phase 3.
 
-**Manual SQL migrations**
-- [ ] Create `changeradar_migrator` and `changeradar_app` (`NOSUPERUSER NOBYPASSRLS`) — dev script + documented production steps.
-- [ ] Helper functions `app_current_workspace_id()`, `app_current_user_id()`, `app_invitation_token_hash()`.
-- [ ] Enable + force RLS; create policies for every tenant table (§27).
-- [ ] CHECK constraints Prisma cannot express.
-- [ ] Runtime grants; column-level UPDATE grants on `document_versions`; no UPDATE on `comparison_changes`, `change_evidence`, `ai_insights`.
+**Scope guard:** Phase 2 delivers schema, roles, RLS, the tenant access layer, seeds and isolation tests only. Do **not** add auth flows/CSRF (Phase 3), workspace/membership endpoints or guards (Phase 4), storage adapters or uploads (Phase 5), queues/extractors (Phase 6), business endpoints or feature DTOs (Phases 7+). `AuthGuard`, `WorkspaceGuard` and `PermissionGuard` are designed here but implemented in Phases 3–4. The comparison engine directory stays pure. Readiness probes stay availability-only until real providers land. No deferred tables from Part F and no deferred enum values beyond the MVP enum types listed in §23 (unused values such as `CANCELLED` are created as part of the enum type, but no deferred features are built).
 
-**Access layer**
-- [ ] `PrismaService` and `TenantDb.run()` with transaction-local context (§8.3).
-- [ ] CI check forbidding session-level `SET app.` and `$queryRawUnsafe`.
-- [ ] Reusable tenant-scoped repository pattern.
-- [ ] Development seed script.
-- [ ] Document global-data exceptions (`users`, `sessions`).
-- [ ] Document migration and rollback procedure.
+#### 2.1 Work breakdown (in implementation order)
 
-**Isolation tests (connect as runtime role)**
-- [ ] Cases 1–4, 9–14 from §20 at database level.
+**P2-01 — Prisma configuration, generator and package scripts**
+- [x] Add root `prisma7.config.ts` using Prisma 7 `defineConfig` (verified: 7.10.1 auto-discovers `prisma7.config.ts`; `prisma.config.ts` is only a legacy candidate): `import 'dotenv/config'`, point `migrations.path` at `prisma/migrations`, and set the **CLI/migrator** datasource URL from `DIRECT_DATABASE_URL` via `env()` (the `changeradar_migrator` role). Prisma 7 config datasources have `url`/`shadowDatabaseUrl` only — no `directUrl`; do not assume Prisma 6 fields still work in `schema.prisma`.
+- [x] Add the `prisma-client` generator to `prisma/schema.prisma` with `output = "../src/generated/prisma"` and `moduleFormat = "cjs"` — this must stay consistent with the CommonJS/`nodenext` source and Node `require(esm)` decision from Phase 0. Never commit `src/generated/`.
+- [x] Keep `DATABASE_URL` as the **runtime** `changeradar_app` URL (used by the `PrismaPg` adapter in code) and `DIRECT_DATABASE_URL` as the migrator URL (CLI only). Document the split in `.env.example`, `README.md` and `AppConfigService` (both variables are already validated in `env.schema.ts`; no new env vars expected).
+- [x] Add exact-version scripts to `package.json`: `db:generate` (`prisma generate`), `db:migrate` (`prisma migrate dev`), `db:migrate:deploy` (`prisma migrate deploy`), `db:migrate:status`, `db:seed`, `db:reset` (dev only). Add any config-file helper dependency (e.g. `dotenv`) with an exact version if Prisma 7 needs it; commit the lockfile and record new versions in `AGENTS.md`.
+- [x] Verify `npx prisma -v`, `npm run db:generate` on the empty schema and that the generated client imports from CommonJS TypeScript. Re-check the `effect` override and install-script allowlist after touching Prisma packages.
+
+**P2-02 — Database roles and grants (dev script + production runbook)**
+- [x] Add `scripts/db/create-roles.sql` (or a wrapper `scripts/db/create-roles.sh` invoking `psql` through the compose Postgres container): create `changeradar_migrator` (owns tables, DDL, LOGIN) and `changeradar_app` (`LOGIN NOSUPERUSER NOBYPASSRLS`). Passwords come from environment/secret injection — never committed; local defaults only in `.env.example`.
+- [x] Grant `changeradar_app`: `USAGE` on schema `public`; `SELECT, INSERT, DELETE` on all tenant tables and `SELECT` on `users`/`sessions`; `UPDATE` only where the MVP writes (e.g. `documents`, `workspaces`, `workspace_members`, `change_reviews`, `processing_records`, and the three allowed columns of `document_versions`).
+- [x] Explicitly **no** `UPDATE` grant on `comparison_changes`, `change_evidence` or `ai_insights` (DB-06 immutability). No `BYPASSRLS` role exists; the migrator is used only in the release step.
+- [x] Document the production role-creation step (migrator role from platform secrets, app role with no superuser/bypassrls) and the fact that DDL never runs at app startup (§21, §29).
+
+**P2-03 — Manual SQL: helper functions, RLS, CHECK constraints**
+- [x] `prisma/manual/0001_context_helpers.sql`: `app_current_workspace_id()`, `app_current_user_id()`, `app_invitation_token_hash()` exactly as §8.2 (`LANGUAGE sql STABLE`, `NULLIF(current_setting(..., true), '')` casting to `uuid`/`text`). Missing context must yield `NULL` and therefore fail closed.
+- [x] `prisma/manual/0002_rls.sql`: `ENABLE` + `FORCE ROW LEVEL SECURITY` on all **13 tenant tables** (everything except global `users` and `sessions`). Generic policy `USING (workspace_id = app_current_workspace_id()) WITH CHECK (...)`; special policies from §27 for `workspaces` (`id = app_current_workspace_id() OR a membership row exists for app_current_user_id()`; writes by id), `workspace_members` (`workspace_id = ... OR user_id = app_current_user_id()`) and `workspace_invitations` (`workspace_id = ... OR token_hash = app_invitation_token_hash()`).
+- [x] `prisma/manual/0003_check_constraints.sql`: every CHECK that Prisma cannot express — per-category `old_text`/`new_text` rules on `comparison_changes`; `source_version_id <> target_version_id` on `comparison_runs`; `workspace_invitations.role <> 'OWNER'`, `max_uses > 0`, `used_count >= 0 AND used_count <= max_uses`; `file_size > 0`; `version_number > 0`; `page_number > 0`; `end_offset >= start_offset >= 0`; `excerpt` ≤ 2,000 chars; `change_reviews.note` ≤ 2,000 chars; `ai_insights.confidence_score` between 0 and 1. Verify Prisma 7.10.1 CHECK support first; anything not natively supported stays in this file (§29).
+- [x] `prisma/manual/0004_grants.sql`: the runtime grants from P2-02, applied after tables exist. Keep each manual file idempotent (`IF NOT EXISTS` / `DO $` blocks) and review the generated + manual SQL together as one ordered release.
+
+**P2-04 — `schema.prisma`: 15 MVP tables, MVP enums and composite FKs**
+- [x] Review ARCHITECTURE Part C (§22–§29) fully before writing the schema; §22 conventions (plural `snake_case`, `workspace_id`, `@map`/`@@map`, app-generated UUIDs, UTC `TIMESTAMPTZ`, JSONB only for document-shaped data) apply throughout.
+- [x] Define the 14 MVP enums from §23 (`workspace_role`, `workspace_status`, `invitation_status`, `document_status`, `document_processing_status`, `file_status`, `comparison_status`, `change_category`, `change_severity`, `review_status`, `ai_analysis_status`, `ai_insight_type`, `processing_type`, `processing_status`). Do not create deferred enums/tables (`token_type`, reports, subscriptions, etc.).
+- [x] Model all 15 tables §24.1–§24.15 with every column, nullability, default and unique constraint. Include the v2.1 additions: `document_versions.upload_token_id` with partial UNIQUE `(workspace_id, upload_token_id) WHERE upload_token_id IS NOT NULL`, the `(workspace_id, document_id, id)` unique on `document_versions`, and `ai_analyses.analyzed_change_count`.
+- [x] Add `UNIQUE (workspace_id, id)` to **every** tenant table (composite-FK prerequisite). For `sessions.ip_address` use Prisma's `Unsupported("inet")` (or verify the closest supported type) and record any divergence from §24.2 in the schema comments.
+- [x] Implement all composite FKs in §25, including the three-column same-document FKs from `comparison_runs` to `document_versions` (`workspace_id, document_id, source_version_id` and `... target_version_id`); they are the database half of DB-01.
+- [x] Apply §26 delete behaviour (`CASCADE`/`RESTRICT` as listed); MVP is archive/soft-delete only, no hard-delete endpoints. Recreate every index listed in §24/§28 (including the partial and DESC indexes) — no extra indexes without `EXPLAIN ANALYZE` evidence.
+- [x] Cross-check the finished schema line by line against §23–§28 and note any deliberate deviation in `docs/ARCHITECTURE.md` (update the architecture first if a design change is actually needed).
+
+**P2-05 — Migration generation, review and release/rollback procedure**
+- [x] Run `npm run db:migrate -- --name init` with the migrator role; review the generated SQL for constraint names, cascade actions, enum creation and index definitions. Apply the manual SQL files in order and verify `prisma migrate deploy` succeeds on a completely empty database (local + CI).
+- [x] Document the ordered release step: roles → `prisma migrate deploy` → manual SQL → grants → app deploy; migrations never run from API/Worker startup.
+- [x] Document rollback: redeploy the previous image; migrations follow expand → migrate → contract; deferred features are additive only (§32). No destructive migration in this phase.
+- [x] Add the CI job steps in the §21 order: lint → typecheck → unit → `check:circular`/`check:forbidden` → **migrations on empty DB** → **integration + isolation** → build. Use a Postgres service container with migrator and app roles created by the bootstrap superuser; secrets from CI, never committed.
+
+**P2-06 — Access layer: `PrismaService`, `TenantDb`, repository pattern**
+- [x] `src/infrastructure/database/prisma.service.ts`: instantiate `PrismaClient` with `new PrismaPg({ connectionString: DATABASE_URL from AppConfigService })`, connect on `onModuleInit`, disconnect on `onModuleDestroy`; no `process.env` reads, no logging of URLs or credentials. Register a global `DatabaseModule`; import it in both `app.module.ts` and `worker.module.ts`.
+- [x] `src/infrastructure/database/tenant-db.ts`: implement `TenantDb.run<T>(ctx, fn)` **exactly** as §8.3 — `$transaction(async (tx) => ...)` with parameterized `$executeRaw` calls to `set_config('app.current_workspace_id', ...)`, `set_config('app.current_user_id', ...)` and optionally `set_config('app.invitation_token_hash', ...)`, always passing `true` as the third argument (transaction-local), then `fn(tx)`, with the documented 10 s timeout. All queries inside `fn` use `tx` only.
+- [x] Define `TenantContext` (`workspaceId?`, `userId?`, `invitationTokenHash?`); empty string for absent workspace/user so context is explicit, and clear the invitation setting in every run so it cannot leak across pooled transactions. No session-level `SET`, no `$queryRawUnsafe`, no external calls (storage/AI) inside a transaction.
+- [x] Add a reusable tenant-scoped repository base: helpers that always include `workspaceId` in `where`/`create` data and accept the `tx` client, so future services cannot forget scoping. Keep it generic; no business repositories yet.
+- [x] Wire the Phase 1 `PrismaErrorMapper` to the generated client (unique violation → 409, FK/missing record → 404) while keeping the documented error catalog; no new error codes.
+
+**P2-07 — CI guard for tenant-context rules**
+- [x] Extend `scripts/check-forbidden.js` (keeping the existing session-level `SET app.` and `$queryRawUnsafe` checks): also fail on `$executeRawUnsafe`, on `set_config(` outside `tenant-db.ts`, on imports of the generated Prisma client outside `src/infrastructure/database/`, and on raw SQL in `src/modules/` that bypasses `TenantDb`. Use an explicit allowlist and clear violation messages.
+- [x] Add unit tests for the checker (a fixture file that violates each rule is rejected; a compliant file passes). Ensure generated code, `dist/` and SQL migration files are handled deliberately, not accidentally scanned or whitelisted wholesale.
+- [x] Confirm `npm run check:forbidden` and `check:circular` still pass and stay in CI before migrations.
+
+**P2-08 — Seed data (development only)**
+- [x] Add an idempotent `prisma/seed.ts` (wired to `db:seed`): two users, two workspaces, sample documents/versions and comparison scaffolding using fixed UUIDs and upserts. Global rows (`users`, `sessions`) are created directly; tenant rows are created through `TenantDb.run()` with the target workspace context (and OWNER membership, §27).
+- [x] Use a clearly documented precomputed argon2id hash of a **dev-only** password (Phase 3 will verify login with it); production seeds must be passwordless. Repeat the seed twice to prove idempotency; do not add seed data to CI's empty-DB migration test.
+
+**P2-09 — Tenant isolation suite (runs as the runtime role)**
+- [x] Add `test/isolation/` helpers that seed fixtures with the migrator role and then execute **all assertions through `DATABASE_URL` (`changeradar_app`)**. Prefer a Testcontainers Postgres for CI (exact version pinned, Docker is available on GitHub runners) with a documented local-compose fallback on host port 5433; both roles are created before migrations.
+- [x] Implement the database-level cases from §20: **1** A cannot read B's documents; **2** A cannot update B's documents; **3** A cannot delete B's documents; **4** A cannot reference B's document versions through the composite FK; **9** missing context returns zero tenant rows; **10** pooled connections do not leak a previous context (interleaved transactions on the same pool); **11** parameterized raw SQL is subject to the same RLS policies; **12** cross-workspace composite FKs fail; **13** runtime role has `rolsuper = false` AND `rolbypassrls = false`; **14** immutable columns cannot be updated (no UPDATE on `comparison_changes`/`change_evidence`/`ai_insights`; only the three allowed columns on `document_versions`).
+- [x] Add `TenantDb` unit tests: `set_config` is called with `true`, all three context values are set/cleared, `fn` runs inside the transaction, and a thrown error rolls back the context. Cases 5–8 of §20 (comparison/AI/invitation/Worker access) are deferred to the phases that create those features, but the schema-level composite FKs and policies they rely on are verified here.
+- [x] Wire the suite into CI after the empty-DB migration step; tag and report isolation results separately.
+
+**P2-10 — Documentation and verification sync**
+- [x] Update `README.md` with the DB role model, `DATABASE_URL` vs `DIRECT_DATABASE_URL`, migration/seed commands, local bootstrap order, RLS summary and rollback procedure; update `CONTRIBUTING.md` with the rule "tenant tables only through `TenantDb.run()`".
+- [x] Run the full verification set: `npm ci && npm run lint && npm run format:check && npm run typecheck && npm run check:circular && npm run check:forbidden && npm test && npm run build`, plus `prisma migrate deploy` on an empty DB, `db:generate`, `db:seed` twice and the isolation suite.
+- [x] Update `AGENTS.md` "Repository state" with the resolved Prisma config approach, new scripts/dependencies and verified commands; set the current phase to Phase 2 (or Phase 3 only after every Phase 2 item is ticked). Tick TASKS items only after verification; keep blocked items as `[!]`.
+
+#### 2.2 Files to create / modify in Phase 2
+
+```text
+prisma7.config.ts
+prisma/schema.prisma
+prisma/migrations/<timestamp>_init/migration.sql          (generated, reviewed)
+prisma/manual/0001_context_helpers.sql
+prisma/manual/0002_rls.sql
+prisma/manual/0003_check_constraints.sql
+prisma/manual/0004_grants.sql
+prisma/seed.ts
+scripts/db/create-roles.sql  scripts/db/create-roles.ts  scripts/db/apply-manual.ts
+scripts/check-forbidden.js
+src/infrastructure/database/{prisma.service.ts,tenant-db.ts,tenant-context.ts,tenant.repository.ts,database.module.ts}
+src/common/errors/prisma-error.mapper.ts
+src/app.module.ts  src/worker.module.ts
+test/setup-env.ts
+test/isolation/{tenant-isolation.spec.ts,fixtures.ts}
+test/infrastructure/database/tenant-db.spec.ts
+test/check-forbidden.spec.ts
+package.json  package-lock.json  .env.example  .gitignore
+.github/workflows/ci.yml
+README.md  CONTRIBUTING.md  AGENTS.md  docs/TASKS.md
+```
+
+Generated client output (`src/generated/prisma/`) stays git-ignored. New dependencies are pinned exactly and recorded in `AGENTS.md`.
+
+#### 2.3 Phase 2 Definition of Done
+
+- `prisma generate` works under the CommonJS/`nodenext` setup; `prisma migrate deploy` plus the four manual SQL files succeed on an empty database in CI, with roles created by the bootstrap superuser.
+- All 15 MVP tables, 14 MVP enums, composite/same-document FKs, unique constraints, indexes and delete rules match §22–§28; the two v2.1 additive columns are present.
+- RLS is `ENABLE` + `FORCE` on all 13 tenant tables with §27 policies; the runtime role is `NOSUPERUSER NOBYPASSRLS` and has only column-level UPDATE grants where intended.
+- `TenantDb.run()` is the sole tenant access path: transaction-local `set_config(..., true)`, no session `SET`, no unsafe raw SQL, no external I/O inside transactions; CI guard enforces this.
+- The isolation suite cases 1–4, 9–14 pass through the runtime role; missing context returns nothing and pooled connections do not leak context.
+- Dev seed is idempotent and contains no production secrets; docs and CI match reality; only verified items are `[x]`.
+
+#### 2.4 Risks / mitigations
+
+- **Prisma 7 config/generator API:** verify `prisma.config.ts`, `defineConfig`, the `prisma-client` generator and `moduleFormat = "cjs"` against 7.10.1 before writing the schema; keep CJS consistent or switch everything deliberately — never mix.
+- **Unsupported `inet`:** `ip_address` may need `Unsupported("inet")`; confirm generated types and document any fallback to `TEXT`.
+- **CHECK constraints:** Prisma 7 may not express all CHECKs; keep them in manual SQL and assert migration ordering so they exist before isolation tests run.
+- **FORCE RLS + grants:** the owner is also subject to RLS, and the app role has no implicit privileges — verify grants table by table (especially the three immutable tables) with the runtime role, not the migrator.
+- **Context leakage across pooled connections:** always pass `true` to `set_config`, clear the invitation setting, and prove it with the interleaved-transaction test (case 10).
+- **CI database roles:** create migrator/app roles from bootstrap secrets; local Postgres uses host port 5433 while CI uses the service container's 5432 — keep both URLs in env, never commit passwords.
+- **Scope creep:** no auth/workspace/storage/queue/business code in this phase; when a later phase needs a new column or index, add it as an additive migration (§32).
 
 **Acceptance criteria:** migrations run on an empty database in CI; RLS protects every tenant table; missing context exposes nothing; pooled connections do not leak context; cross-tenant tests pass.
 

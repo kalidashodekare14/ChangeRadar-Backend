@@ -7,7 +7,7 @@ Backend API and background worker for **ChangeRadar**, a document change intelli
 - **Data:** PostgreSQL, Redis, and S3-compatible object storage (RustFS locally).
 - **Source of truth:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and the phase plan in [`docs/TASKS.md`](docs/TASKS.md).
 
-> **Current status:** Phase 1 application core is implemented and verified locally (config validation, envelopes, error catalog, logging, health, Swagger, Docker/CI). Staging deployment is blocked pending provider/credentials; the Docker image build is unverified because the local Docker daemon was unavailable. Database schema and auth arrive in Phases 2–3. See `docs/TASKS.md` for the roadmap.
+> **Current status:** Phases 1–2 are implemented and verified locally. Phase 2 adds the 15-table MVP schema, migrator/runtime roles, forced RLS, `TenantDb` transaction-local context, seeds and the isolation suite. Staging deployment remains blocked pending provider/credentials. Auth arrives in Phase 3. See `docs/TASKS.md` for the roadmap.
 
 ## Prerequisites
 
@@ -103,9 +103,15 @@ src/
 ├── worker.module.ts
 ├── config/                 # typed, validated configuration (Zod, fail fast)
 ├── common/                 # errors, envelopes, logging, middleware, pagination DTOs
+├── infrastructure/database/ # PrismaService, TenantDb, tenant repository base
 ├── infrastructure/redis/   # Redis client + throttler storage
 └── modules/health/         # liveness and readiness probes
-prisma/                     # Phase 2: schema, migrations, seed
+prisma/schema.prisma        # 15 MVP tables + 14 MVP enums
+prisma/migrations/          # generated Prisma migration
+prisma/manual/              # helper functions, RLS, CHECKs, grants
+prisma/seed.ts              # idempotent development seed
+prisma7.config.ts           # Prisma CLI config (migrator URL)
+scripts/db/                 # role creation + manual SQL runner
 scripts/storage/            # RustFS bucket/CORS/lifecycle init
 scripts/check-forbidden.js  # CI guard for forbidden SQL patterns
 test/                       # unit, e2e, isolation, fixtures
@@ -118,7 +124,7 @@ test/                       # unit, e2e, isolation, fixtures
 - **Validation:** global `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true })`. HTTP DTOs use `class-validator`/`class-transformer`; env, job payloads and AI output use Zod.
 - **Security:** `helmet`, cookie parser, and `trust proxy` from `TRUST_PROXY_HOPS` (0 locally; set per platform in staging/production). The API relies on the frontend's same-origin rewrite, so no API CORS is configured.
 - **Logging:** structured JSON via `nestjs-pino`; credentials, cookies, tokens, presigned URLs and document text are redacted and never logged.
-- **CI order:** lint → format check → typecheck → circular/forbidden checks → unit tests → build → runtime-only `npm audit`. Phase 2 adds migrations and isolation tests.
+- **CI order:** lint → format check → typecheck → circular/forbidden checks → unit tests → build → runtime-only `npm audit`, plus a database job: roles → migrations on an empty DB → manual SQL → isolation tests → build.
 - **Docker:** one multi-stage image; `node dist/main.js` for the API, `node dist/worker.js` for the Worker. Database migrations are never run at startup.
 
 ## Environment
@@ -127,7 +133,28 @@ test/                       # unit, e2e, isolation, fixtures
 - `.env` is ignored; never commit real secrets.
 - `S3_ENDPOINT` is the **server-side** endpoint (`http://localhost:9000` on the host, `http://storage:9000` inside compose).
 - `S3_PUBLIC_ENDPOINT` is the **browser-reachable** endpoint used to sign presigned URLs (`http://localhost:9000`).
-- Local PostgreSQL bootstrap credentials are `changeradar` / `changeradar`. The runtime (`changeradar_app`) and migrator (`changeradar_migrator`) roles are created in Phase 2.
+- Local PostgreSQL bootstrap credentials are `changeradar` / `changeradar`. `npm run db:roles` creates `changeradar_migrator` (DDL) and `changeradar_app` (`NOSUPERUSER NOBYPASSRLS`, DML only) from `BOOTSTRAP_DATABASE_URL` / `MIGRATOR_PASSWORD` / `APP_PASSWORD`.
+- `DATABASE_URL` is the runtime app-role URL used by the API/Worker through the `PrismaPg` adapter; `DIRECT_DATABASE_URL` is the migrator URL used only by the Prisma CLI.
+
+## Database and tenant isolation
+
+The workspace is the tenant. Tenant tables are reachable only through `TenantDb.run()`, which sets `app.current_workspace_id`, `app.current_user_id` and `app.invitation_token_hash` with transaction-local `set_config(..., true)`. Every tenant table has `ENABLE` + `FORCE ROW LEVEL SECURITY`; missing context fails closed. `users`/`sessions` are global exceptions. No superuser or `BYPASSRLS` role exists at runtime.
+
+Local bootstrap order (after `docker compose up -d postgres`):
+
+```powershell
+npm ci
+npm run db:generate                 # Prisma 7 client -> src/generated/prisma (git-ignored)
+npm run db:roles                    # creates migrator + runtime roles (bootstrap URL)
+npm run db:migrate:deploy           # tables, relations, constraints, indexes
+npm run db:manual                   # helpers, RLS, CHECKs, grants (idempotent)
+npm run db:seed                     # two users/workspaces + sample data (idempotent)
+```
+
+- `npm run db:migrate` is for schema changes in development; `npm run db:reset` recreates the local database (dev only). Never run migrations from the API/Worker.
+- `npm run check:forbidden` fails on session-level `SET app.`, unsafe raw SQL, `set_config` outside `TenantDb`, and direct generated-client imports outside the database/error layer.
+- Isolation tests: `RUN_DB_TESTS=true npm test -- --runInBand test/isolation`. They seed fixtures as the migrator role and run all assertions as `changeradar_app`. Cases 1–4 and 9–14 of ARCHITECTURE §20 run in this phase; cases 5–8 are added with their features.
+- Release/rollback: roles → `migrate deploy` → manual SQL → grants → app deploy. Roll back by redeploying the previous image; migrations follow expand → migrate → contract. Deferred features are additive only.
 
 ## API vs Worker
 

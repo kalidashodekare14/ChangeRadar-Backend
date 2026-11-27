@@ -23,3 +23,41 @@ jobs:
       - run: npm run build
       # Runtime advisories only; dev-only advisories are revisited in Phase 12.
       - run: npm audit --omit=dev --audit-level=high
+
+  database:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: changeradar
+          POSTGRES_USER: changeradar
+          POSTGRES_PASSWORD: changeradar
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U changeradar -d changeradar"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      BOOTSTRAP_DATABASE_URL: postgresql://changeradar:changeradar@localhost:5432/changeradar?schema=public
+      DIRECT_DATABASE_URL: postgresql://changeradar_migrator:ci-migrator@localhost:5432/changeradar?schema=public
+      DATABASE_URL: postgresql://changeradar_app:ci-app@localhost:5432/changeradar?schema=public
+      MIGRATOR_PASSWORD: ci-migrator
+      APP_PASSWORD: ci-app
+      RUN_DB_TESTS: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26.13.0'
+          cache: npm
+      - run: npm ci
+      - run: npm run db:generate
+      # Release order: roles -> Prisma Migrate on an empty DB -> manual SQL.
+      - run: npm run db:roles
+      - run: npm run db:migrate:deploy
+      - run: npm run db:manual
+      - run: npm test -- --runInBand test/isolation
+      - run: npm run build

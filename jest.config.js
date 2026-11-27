@@ -6,6 +6,9 @@ module.exports = {
   transform: {
     '^.+\\.ts$': ['ts-jest', { tsconfig: 'tsconfig.json' }],
   },
+  // The Prisma 7 generated client imports sibling `.js` files that are actually
+  // `.ts` sources in this CommonJS/nodenext setup.
+  moduleNameMapper: { '^(\\.{1,2}/.*)\\.js$': '$1' },
   collectCoverageFrom: ['src/**/*.ts', '!src/generated/**'],
   coverageDirectory: 'coverage',
   testEnvironment: 'node',
